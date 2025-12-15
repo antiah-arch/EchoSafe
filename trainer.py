@@ -121,6 +121,11 @@ class FileSource:
 Source = SerialSource | MicrophoneSource | FileSource
 
 
+@dataclass
+class Args:
+    source: Source
+
+
 def load_command_line(args: list[str]) -> Config:
     def source_parser(source: str) -> Source:
         stream = iter(source.split(":"))
@@ -178,30 +183,6 @@ def load_command_line(args: list[str]) -> Config:
             case _:
                 error(f"Unknown method {first}")
 
-    parser = argparse.ArgumentParser(
-        prog="echosafe",
-        description="Arduino to TensorFlowLite Interface bridge",  # whatever that means
-        epilog=f"for more information see {REPO_URL}",
-    )
-    # parser.add_argument("-c", "--com", default=COM_PORT)
-    # parser.add_argument("-v", "--verbose", action="store_true")
-    # parser.add_argument(
-    #     "-m", "--model", default="./model/sound_model.tflite", help="Path to TFLite model"
-    # )
-    # parser.add_argument("-s", "--window-size", type=int, default=WINDOW_SIZE)
-    # parser.add_argument("-f", "--feature-count", type=int, default=FEATURE_COUNT)
-    # parser.add_argument(
-    #     "-t",
-    #     "--test",
-    #     help="run in test mode using a simulated data stream CSV file.",
-    # )
-
-    # subparsers = parser.add_subparsers()
-    # record = subparsers.add_parser('record')
-    # record.add_argument("-s","--serial",help="use a serial COM port as record source")
-    # record.add_argument("-m","--microphone",help="use a system microphone as record source")
-    # record.add_argument("-v")
-
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("-v", "--verbose", action="store_true")
     shared.add_argument(
@@ -211,7 +192,12 @@ def load_command_line(args: list[str]) -> Config:
         metavar="SOURCE",
     )
 
-    parser = argparse.ArgumentParser(parents=[shared])
+    parser = argparse.ArgumentParser(
+        prog="echosafe",
+        description="Arduino to TensorFlowLite Interface bridge",  # whatever that means
+        epilog=f"for more information see {REPO_URL}",
+        parents=[shared],
+    )
     subparsers = parser.add_subparsers()
     record = subparsers.add_parser("record")
     record.add_argument(
@@ -230,7 +216,7 @@ def load_command_line(args: list[str]) -> Config:
         help="file path to write model",
     )
 
-    parsed = parser.parse_args(args=args)
+    parsed = parser.parse_args()
     parser.print_help()
     return Config(
         window_size=parsed.window_size,
@@ -303,7 +289,7 @@ def open_serial_data(serial_connection: serial.Serial) -> Iterator[DataEntry]:
     return DataEntry.from_mic_iterable(
         map(
             lambda mic: int(mic),
-            filter(lambda mic: not mic.isdigit(), microphone_values),
+            filter(lambda mic: mic.isdigit(), microphone_values),
         )
     )
 
