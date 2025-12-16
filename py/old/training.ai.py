@@ -3,18 +3,23 @@ import os
 import time
 from collections import deque
 
-import serial
 import numpy as np
+import serial
 import tensorflow as tf
-from numpy.fft import rfft
+from numpy.fft import rfft  # ignore
 
 # -----------------------------
 # SETTINGS (defaults, overridable via CLI)
 # -----------------------------
-COM_PORT = "COM3"   # Change to your Arduino port or pass --com
-WINDOW_SIZE = 256   # Must match feature extraction window
+COM_PORT = "COM3"  # Change to your Arduino port or pass --com
+WINDOW_SIZE = 256  # Must match feature extraction window
 NUM_FEATURES = 20
 COOLDOWN = 0.3  # seconds between motor triggers
+
+ser = serial.Serial("COM3", 9600, timeout=1)
+time.sleep(2)  # Arduino reset
+
+ser.write(b"1")  # Turn LED on
 
 
 def extract_features(signal, num_features=NUM_FEATURES):
@@ -23,7 +28,9 @@ def extract_features(signal, num_features=NUM_FEATURES):
     Returns a numpy array shaped `(1, num_features)` and dtype float32 (model input).
     """
     fft_vals = np.abs(rfft(signal))
-    features = np.array([np.mean(fft_vals[i::num_features]) for i in range(num_features)])
+    features = np.array(
+        [np.mean(fft_vals[i::num_features]) for i in range(num_features)]
+    )
     return np.array([features], dtype=np.float32)
 
 
@@ -46,7 +53,7 @@ def replay_csv_lines(path):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for raw in f:
             # Try to extract the first numeric token from the line
-            token = raw.strip().split(',')[0]
+            token = raw.strip().split(",")[0]
             val = parse_int_line(token)
             if val is not None:
                 yield str(val)
@@ -55,10 +62,14 @@ def replay_csv_lines(path):
 def main(args=None):
     parser = argparse.ArgumentParser(description="Arduino -> TFLite inference bridge")
     parser.add_argument("--com", default=COM_PORT, help="Serial COM port (e.g. COM3)")
-    parser.add_argument("--model", default="sound_model.tflite", help="Path to TFLite model")
+    parser.add_argument(
+        "--model", default="sound_model.tflite", help="Path to TFLite model"
+    )
     parser.add_argument("--window-size", type=int, default=WINDOW_SIZE)
     parser.add_argument("--num-features", type=int, default=NUM_FEATURES)
-    parser.add_argument("--simulate", help="Path to CSV/text file to replay instead of serial")
+    parser.add_argument(
+        "--simulate", help="Path to CSV/text file to replay instead of serial"
+    )
     parsed = parser.parse_args(args=args)
 
     window_size = parsed.window_size
@@ -113,16 +124,16 @@ def main(args=None):
                 if prediction == 1 and (time.time() - last_trigger) > COOLDOWN:
                     print("👏 CLAP detected!")
                     if ser:
-                        ser.write(b'1')
+                        ser.write(b"1")
                     last_trigger = time.time()
                 else:
                     if ser:
-                        ser.write(b'0')
+                        ser.write(b"0")
 
     except KeyboardInterrupt:
         print("\n🛑 Exiting...")
     finally:
-        if ser and getattr(ser, 'is_open', False):
+        if ser and ser.is_open:
             ser.close()
 
 
