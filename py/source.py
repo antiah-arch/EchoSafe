@@ -1,7 +1,20 @@
+import os
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from io import TextIOWrapper
 from time import time
-from printing import error, warning
-from collections.abc import Iterable,Iterator
+from typing import cast
+
+from serial import Serial
+from utils import error, success, warning
+
+BAUDRATE = 9600  # speed of communication over connection in baud
+QUANTITY: int = 0
+TIME_LABEL = "time"
+MIC_VALUE_LABEL = "mic_value"
+QUANTITY_LABEL = "label"
+
+
 # Source ADT
 @dataclass(frozen=True)
 class SerialSource:
@@ -21,6 +34,8 @@ class FileSource:
 
 
 Source = SerialSource | MicrophoneSource | FileSource
+
+
 def source_parser(source: str) -> Source:
     stream = iter(source.split(":"))
     first = next(stream, None)
@@ -59,9 +74,7 @@ def source_parser(source: str) -> Source:
                             )
                         case _:
                             if not i.isdigit():
-                                error(
-                                    f'{i} is not a digit in "microphone:index:{i}"'
-                                )
+                                error(f'{i} is not a digit in "microphone:index:{i}"')
                             return MicrophoneSource(index=int(i))
                 case "name":
                     name = next(stream, None)
@@ -76,6 +89,7 @@ def source_parser(source: str) -> Source:
                     error(f"Unknown method {submethod}")
         case _:
             error(f"Unknown method {first}")
+
 
 @dataclass
 class DataEntry:
@@ -107,6 +121,49 @@ class DataEntry:
             lambda mic: DataEntry(time() - start, int(mic), QUANTITY), microphone_values
         )
         # filter(lambda mic: not mic.isdigit(), microphone_values),
+
+
+def initiate_serial_connection(com_port: str) -> Serial:
+    serial_connection = Serial(com_port, BAUDRATE, timeout=1)
+    success(f"connected to device on port {com_port}")
+    return serial_connection
+
+
+def open_microphone_data(microphone_raw) -> Iterator[DataEntry]:
+    error("microphone not implemented")
+
+
+def open_serial_data(serial_connection: Serial) -> Iterator[DataEntry]:
+    microphone_values: Iterator[str] = iter(
+        lambda: serial_connection.readline().decode(errors="ignore").strip(), ""
+    )
+    return DataEntry.from_mic_iterable(
+        map(
+            lambda mic: int(mic),
+            filter(lambda mic: mic.isdigit(), microphone_values),
+        )
+    )
+
+
+def open_file_data(lines: TextIOWrapper) -> Iterator[DataEntry]:
+    return (
+        cast(  # needed because pyright is unaware of the type narrowing in the filter
+            Iterator[DataEntry],
+            filter(
+                lambda x: isinstance(x, DataEntry),
+                map(lambda entry: DataEntry.from_csv_entry(entry), lines),
+            ),
+        )
+    )
+
+
+@dataclass
+class DataStream:
+    iterator: Iterator[DataEntry]
+    backer: TextIOWrapper | Serial
+
+    def close(self):
+        self.backer.close()
 
     # @staticmethod
     # def from_iterable(xs: Iterable) -> "Iterator[DataEntry]":
