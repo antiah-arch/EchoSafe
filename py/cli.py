@@ -8,17 +8,11 @@ import sys
 from typing import cast
 from utils import Writeable, WriteableAndCloseable, error
 from serial import Serial
-from source import (
-    DataEntry,
-    DataStream,
-    FileSource,
-    MicrophoneSource,
-    SerialSource,
-    Source,
-    initiate_serial_connection,
-    open_file_data,
-    open_serial_data,
-)
+from py.cli import Args, Record, Run, parse_command_line
+from py.recording import record
+from py.trainer import initialize_model, train
+from py.source import Source, SerialSource, FileSource, MicrophoneSource, DataStream, open_serial_data, open_file_data
+from serial_helper import open_serial, close_serial, initiate_serial_connection
 
 WINDOW_SIZE = 256
 FEATURE_COUNT: int = 20

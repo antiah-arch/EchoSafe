@@ -1,6 +1,6 @@
-from cli import Args, Record, Run, parse_command_line
-from recording import record
-from trainer import initialize_model, train
+from py.cli import Args, Record, Run, parse_command_line
+from py.recording import record
+from py.trainer import initialize_model, train
 
 
 def main():
