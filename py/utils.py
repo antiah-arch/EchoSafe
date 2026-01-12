@@ -2,7 +2,7 @@ import sys
 from typing import NoReturn, Protocol
 
 import colored
-from _typeshed import SupportsWrite
+
 
 from py.cli import parse_file_path, parse_serial_path
 from py.source import initiate_serial_connection

@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 from argparse import Namespace
 from collections.abc import Iterator
 from dataclasses import dataclass

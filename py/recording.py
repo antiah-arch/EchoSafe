@@ -1,7 +1,7 @@
 import csv
 from collections.abc import Iterator
 
-from _typeshed import SupportsWrite
+
 from source import MIC_VALUE_LABEL, QUANTITY_LABEL, TIME_LABEL, DataEntry
 from utils import Writeable, success
 

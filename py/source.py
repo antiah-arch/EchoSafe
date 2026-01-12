@@ -1,4 +1,4 @@
-﻿import os
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from io import TextIOWrapper

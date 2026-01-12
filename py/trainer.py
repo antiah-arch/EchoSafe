@@ -4,7 +4,7 @@ from time import time
 from typing import TYPE_CHECKING
 
 import numpy as np
-from _typeshed import SupportsWrite
+
 from numpy.fft import rfft
 from numpy.typing import NDArray
 from source import DataEntry
