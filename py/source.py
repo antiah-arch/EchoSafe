@@ -6,7 +6,7 @@ from time import time
 from typing import cast
 
 from serial import Serial
-from py.utils import error, success, warning
+from utils import error, success, warning
 
 BAUDRATE = 9600  # speed of communication over connection in baud
 QUANTITY: int = 0
@@ -78,7 +78,7 @@ def source_parser(source: str) -> Source:
                             return MicrophoneSource(index=int(i))
                 case "name":
                     name = next(stream, None)
-                    match name:
+                    match name:  # print("are we type checking?")name:
                         case None:
                             error(
                                 "microphone:index requires a name which may be a substring of the full system name, eg. --source microphone:name:built-in"

@@ -1,6 +1,6 @@
-from py.cli import Args, Record, Run, parse_command_line
-from py.recording import record
-from py.trainer import initialize_model, train
+from cli import Args, Record, Run, parse_command_line
+from recording import record
+from trainer import initialize_model, train
 
 
 def main():
@@ -30,3 +30,7 @@ def main():
     if can_close_output:
         output.close()
     # interpretor = initialize_model(args.model)
+
+
+if __name__ == "__main__":
+    main()

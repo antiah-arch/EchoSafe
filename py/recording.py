@@ -1,7 +1,7 @@
 import csv
 from collections.abc import Iterator
 
-
+# from _typeshed import SupportsWrite
 from source import MIC_VALUE_LABEL, QUANTITY_LABEL, TIME_LABEL, DataEntry
 from utils import Writeable, success
 
@@ -15,8 +15,8 @@ from utils import Writeable, success
 #         success(f"finished recording to {path}")
 
 
-def record(output: SupportsWrite[str], data: Iterator[DataEntry], seconds: int) -> None:
-    writer = csv.writer(output)
+def record(output: Writeable, data: Iterator[DataEntry], seconds: int) -> None:
+    writer = csv.writer(output)  # type: ignore stupid python
 
 
 # def record_serial(path: str, com_port: str, seconds: int) -> None:

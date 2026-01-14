@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+# from _typeshed import SupportsWrite
 from numpy.fft import rfft
 from numpy.typing import NDArray
 from source import DataEntry
@@ -12,6 +13,7 @@ from utils import subtext
 
 if TYPE_CHECKING:
     import tensorflow as tf
+    from _typeshed import SupportsWrite
 
 
 def initialize_model(model: str) -> "tf.lite.Interpreter":
@@ -35,7 +37,7 @@ COOLDOWN: int = 10
 
 def train(
     interpreter: "tf.lite.Interpreter",
-    output: SupportsWrite,
+    output: "SupportsWrite",
     window_size: int,
     feature_count: int,
     data_stream: Iterator[DataEntry],
