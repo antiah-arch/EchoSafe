@@ -1,75 +1,58 @@
-from collections import deque
-from collections.abc import Iterator
-from time import time
-from typing import TYPE_CHECKING
-
+import pandas as pd
 import numpy as np
-
-# from _typeshed import SupportsWrite
 from numpy.fft import rfft
-from numpy.typing import NDArray
-from source import DataEntry
-from utils import subtext
-
-if TYPE_CHECKING:
-    import tensorflow as tf
-    from _typeshed import SupportsWrite
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+import joblib
 
 
-def initialize_model(model: str) -> "tf.lite.Interpreter":
-    import tensorflow as tf
-
-    interpreter = tf.lite.Interpreter(model_path=model)
-    interpreter.allocate_tensors()
-    return interpreter
+FEATURE_COUNT = 16
+WINDOW_SIZE = 64
+MODEL_OUT = "clap_model.pkl"
 
 
-def extract_features(signal: list[int], feature_count: int) -> NDArray:
-    fft_vals: NDArray = np.abs(rfft(signal))
+def extract_features(signal: np.ndarray) -> np.ndarray:
+    fft_vals = np.abs(rfft(signal))
     features = np.array(
-        [np.mean(fft_vals[i::feature_count]) for i in range(feature_count)]
+        [np.mean(fft_vals[i::FEATURE_COUNT]) for i in range(FEATURE_COUNT)]
     )
-    return np.array([features], dtype=np.float32)
+    return features
 
 
-COOLDOWN: int = 10
+clap = pd.read_csv("sound_data_label1.csv")
+noise = pd.read_csv("sound_data_label0.csv")
+data = pd.concat([clap, noise]).reset_index(drop=True)
 
 
-def train(
-    interpreter: "tf.lite.Interpreter",
-    output: "SupportsWrite",
-    window_size: int,
-    feature_count: int,
-    data_stream: Iterator[DataEntry],
-):
-    buffer: deque[int] = deque(maxlen=window_size)
-    last_trigger: int = 0
-    for entry in data_stream:
-        if (
-            len(buffer) >= window_size
-        ):  # if buffer length is greater than or equal to window size,
-            # but it can only ever be equal to...
+X, y = [], []
 
-            # all of this being each iteration feels wrong.
-            window: list[int] = list(buffer)[
-                -window_size:
-            ]  # cast to list might degrade benefits of deque
-            features = extract_features(window, feature_count)
-            index = interpreter.get_input_details()[0][
-                "index"
-            ]  # magic weird data access
+for label in [0, 1]:
+    subset = data[data["label"] == label]["mic_value"].values
 
-            interpreter.set_tensor(index, features)
-            interpreter.invoke()
-            model_output = interpreter.get_tensor(
-                interpreter.get_output_details()[0]["index"]
-            )[0]
-            prediction = int(np.argmax(model_output))  # what does this do
-            # clap detection
+    for i in range(len(subset) - WINDOW_SIZE):
+        window = subset[i : i + WINDOW_SIZE]
+        features = extract_features(window)
+        X.append(features)
+        y.append(label)
 
-            if prediction == 1 and (time() - last_trigger) > COOLDOWN:
-                subtext("clap detected")
-                output.write(b"1")  # send signal down to output line
-            else:
-                output.write(b"0")  # seems redundant?
-                # couldnt we just send a blip when something happens?
+X = np.array(X)
+y = np.array(y)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+
+model = LogisticRegression(max_iter=1000)
+model.fit(X_train, y_train)
+
+
+preds = model.predict(X_test)
+accuracy = accuracy_score(y_test, preds)
+
+print(f"✅ Model accuracy: {accuracy * 100:.2f}%")
+
+
+joblib.dump(model, MODEL_OUT)
+print(f"💾 Saved model to {MODEL_OUT}")

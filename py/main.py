@@ -1,4 +1,4 @@
-from cli import Args, Record, Run, parse_command_line
+from cli import Args, Record, Train, parse_command_line
 from recording import record
 from trainer import initialize_model, train
 
@@ -8,7 +8,7 @@ def main():
     source = args.open_source()
     output, can_close_output = args.open_output()
     match args.command:
-        case command if isinstance(command, Run):
+        case command if isinstance(command, Train):
             interpreter = initialize_model(args.model)
 
             train(

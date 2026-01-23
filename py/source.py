@@ -8,7 +8,7 @@ from typing import cast
 from serial import Serial
 from utils import error, success, warning
 
-BAUDRATE = 9600  # speed of communication over connection in baud
+BAUDRATE = 115200  # speed of communication over connection in baud
 QUANTITY: int = 0
 TIME_LABEL = "time"
 MIC_VALUE_LABEL = "mic_value"
@@ -78,7 +78,7 @@ def source_parser(source: str) -> Source:
                             return MicrophoneSource(index=int(i))
                 case "name":
                     name = next(stream, None)
-                    match name:  # print("are we type checking?")name:
+                    match name:
                         case None:
                             error(
                                 "microphone:index requires a name which may be a substring of the full system name, eg. --source microphone:name:built-in"
@@ -95,12 +95,12 @@ def source_parser(source: str) -> Source:
 class DataEntry:
     time: float
     microphone: int
-    quantity: int
+    clap_confidence: float # score of how much of a clap it is.
 
     @staticmethod
     def from_csv_entry(s: str) -> "DataEntry|None":
         parsed = s.strip().split(",")[:3]
-        raw_time, raw_microphone, raw_quantity = parsed
+        raw_time, raw_microphone, raw_clap_confidence = parsed
         # if any arent digits
         if any(map(lambda a: not a.isdigit(), parsed)):
             warning(f"could not parse mangled CSV entry {parsed} non-digit present.")
@@ -108,17 +108,17 @@ class DataEntry:
         else:
             time = float(raw_time)
             microphone = int(raw_microphone)
-            quantity = int(raw_quantity)
-            return DataEntry(time, microphone, quantity)
+            clap_confidence = float(raw_clap_confidence)
+            return DataEntry(time, microphone, clap_confidence)
 
     def to_csv_entry(self) -> str:
-        return f"{self.time},{self.microphone},{self.quantity}"
+        return f"{self.time},{self.microphone},{self.clap_confidence}"
 
     @staticmethod
     def from_mic_iterable(microphone_values: Iterable[int]) -> "Iterator[DataEntry]":
         start = time()
         return map(
-            lambda mic: DataEntry(time() - start, int(mic), QUANTITY), microphone_values
+            lambda mic: DataEntry(time() - start, int(mic), CLAP_FACTOR), microphone_values
         )
         # filter(lambda mic: not mic.isdigit(), microphone_values),
 
@@ -129,7 +129,7 @@ def initiate_serial_connection(com_port: str) -> Serial:
     return serial_connection
 
 
-def open_microphone_data(microphone_raw) -> Iterator[DataEntry]:
+def open_microphone_data(microphone_raw: str) -> Iterator[DataEntry]:
     error("microphone not implemented")
 
 
@@ -137,6 +137,7 @@ def open_serial_data(serial_connection: Serial) -> Iterator[DataEntry]:
     microphone_values: Iterator[str] = iter(
         lambda: serial_connection.readline().decode(errors="ignore").strip(), ""
     )
+    
     return DataEntry.from_mic_iterable(
         map(
             lambda mic: int(mic),
@@ -165,18 +166,4 @@ class DataStream:
     def close(self):
         self.backer.close()
 
-    # @staticmethod
-    # def from_iterable(xs: Iterable) -> "Iterator[DataEntry]":
-    #     return cast(  # needed because pyright is unaware of the type narrowing in the filter
-    #         Iterator[DataEntry],
-    #         filter(
-    #             lambda x: isinstance(x, DataEntry),
-    #             map(lambda entry: DataEntry.from_csv_entry(entry), xs),
-    #         ),
-    #     )
 
-    # @staticmethod
-
-
-# returns an iterator over the serial connection
-#

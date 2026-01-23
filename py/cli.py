@@ -20,7 +20,7 @@ from source import (
     open_file_data,
     open_serial_data,
 )
-from utils import Writeable, WriteableAndCloseable, error
+from utils import  error
 
 
 WINDOW_SIZE = 256
@@ -34,12 +34,15 @@ class Record:
 
 
 @dataclass(frozen=True)
-class Run:
+class Train:
     window_size: int
     feature_count: int
 
+@dataclass(frozen=True)
+class Run:
+    pass
 
-Command = Run | Record
+Command = Train | Record | Run
 
 
 def parse_serial_path(stream: Iterator[str]) -> SerialSource:
@@ -123,17 +126,20 @@ class Args:
         model: str = raw.model
         command: Command
         match raw.command:
-            case "run":
-                command = Run(raw.window_size, raw.feature_count)
+            case "train":
+                command = Train(raw.window_size, raw.feature_count)
             case "record":
                 command = Record(raw.seconds)
+            case "run":
+                command = Run()
             case _:
                 error(f"unknown sub-command {raw.command}")
         return Args(source, output, verbose, command, model)
 
     # second value tells it if it SHOULD be closed. stdout should not be.
     # could wrap in another ADT but simple generics should be sufficent here.
-    def open_output(self) -> tuple[WriteableAndCloseable, bool]:
+    def open_output(self) -> tuple[object, bool]: # type: ignore
+        # figure out type later, was writableCloseable
         stream = iter(self.output.strip().split(":"))
         first = next(stream)
         match first:
@@ -213,17 +219,17 @@ def parse_command_line() -> Args:
         default="recordings/recording.csv",
     )
 
-    run = subparsers.add_parser("run", parents=[shared])
-    run.add_argument("-f", "--feature-count", type=int, default=FEATURE_COUNT)
-    run.add_argument("-w", "--window-size", type=int, default=WINDOW_SIZE)
-    run.add_argument(
+    train = subparsers.add_parser("train", parents=[shared])
+    train.add_argument("-f", "--feature-count", type=int, default=FEATURE_COUNT)
+    train.add_argument("-w", "--window-size", type=int, default=WINDOW_SIZE)
+    train.add_argument(
         "-m",
         "--model",
         default="./models/model.tflite",
         metavar="MODEL_PATH",
         help="tflite model file to use",
     )
-    run.add_argument(
+    train.add_argument(
         "-o",
         "--output",
         default="stdout",

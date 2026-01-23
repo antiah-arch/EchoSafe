@@ -6,7 +6,7 @@ import tensorflow as tf
 from numpy.fft import rfft
 
 from config import COM_PORT, BAUD_RATE, WINDOW_SIZE, NUM_FEATURES, COOLDOWN
-from serial_helper import open_serial, close_serial
+from serical_helper import open_serial, close_serial
 
 def extract_features(signal, num_features=NUM_FEATURES):
     fft_vals = np.abs(rfft(signal))
