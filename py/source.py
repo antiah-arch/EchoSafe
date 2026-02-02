@@ -118,9 +118,9 @@ class DataEntry:
     def from_mic_iterable(microphone_values: Iterable[int]) -> "Iterator[DataEntry]":
         start = time()
         return map(
-            lambda mic: DataEntry(time() - start, int(mic), CLAP_FACTOR), microphone_values
+            lambda mic: DataEntry(time() - start, int(mic), 0.0),
+            microphone_values,
         )
-        # filter(lambda mic: not mic.isdigit(), microphone_values),
 
 
 def initiate_serial_connection(com_port: str) -> Serial:
