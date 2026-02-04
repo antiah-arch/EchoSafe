@@ -1,18 +1,12 @@
-const int micPin = A0;
-const int ledPin = 9;
+const int MIC_PIN = A0;
 
 void setup() {
-  Serial.begin(115200); // Match Python
-  pinMode(ledPin, OUTPUT);
+  Serial.begin(115200);
 }
 
 void loop() {
-  int micValue = analogRead(micPin);
+  int micValue = analogRead(MIC_PIN);
   Serial.println(micValue);
-
-  if (Serial.available()) {
-    char cmd = Serial.read();
-    digitalWrite(ledPin, (cmd == '1') ? HIGH : LOW);
-  }
-  delay(5);
+  delay(10);  // ~100 samples/sec
 }
+

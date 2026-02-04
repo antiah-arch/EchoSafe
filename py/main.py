@@ -1,4 +1,4 @@
-from cli import Args, Record, Train, parse_command_line
+from cli import Args, Record, Run, Train, parse_command_line, run
 from recording import record
 from trainer import initialize_model, train
 
@@ -26,6 +26,8 @@ def main():
             pass
             # pass to recorder function
             # finish
+        case command if isinstance(command,Run):
+            run(source.iterator,args.model)
     source.close()
     if can_close_output:
         output.close()

@@ -1,48 +1,4 @@
-# import time
-# import csv
-# import atexit
-# from config import COM_PORT, BAUD_RATE
-# from serial_helper import open_serial, close_serial
 
-# # ==========================
-# # CONFIG
-# # ==========================
-# DURATION = 10        # seconds to record
-# LABEL = 1            # 1 = clap, 0 = noise
-# OUTPUT_FILE = f"sound_data_label{LABEL}.csv"
-
-# # ==========================
-# # MAIN
-# # ==========================
-# def main():
-#     # Open serial connection to Arduino
-#     ser = open_serial(COM_PORT, BAUD_RATE)
-#     atexit.register(close_serial, ser)  # auto-close on crash
-
-#     print(f"Recording for {DURATION}s (label={LABEL})...")
-
-#     with open(OUTPUT_FILE, "w", newline="") as csvfile:
-#         writer = csv.writer(csvfile)
-#         writer.writerow(["time", "mic_value", "label"])
-
-#         start_time = time.time()
-
-#         while time.time() - start_time < DURATION:
-#             line = ser.readline().decode(errors="ignore").strip()
-
-#             # Only keep valid numeric readings
-#             if line.isdigit():
-#                 timestamp = time.time() - start_time
-#                 mic_value = int(line)
-#                 writer.writerow([timestamp, mic_value, LABEL])
-
-#     close_serial(ser)
-#     print(f"Saved data to {OUTPUT_FILE}")
-
-# # ==========================
-# if __name__ == "__main__":
-#     main()
-# recording.py
 import csv
 from collections import deque
 from time import time
@@ -58,7 +14,7 @@ WINDOW_SIZE = 20           # rolling baseline samples
 CLAP_THRESHOLD = 200       # threshold for detecting claps
 OUTPUT_CSV = "output.csv"
 
-USE_ARDUINO = False  # Set True to read live from Arduino
+USE_ARDUINO = True  # Set True to read live from Arduino
 
 # ----------------------------
 # MIC VALUES SETUP

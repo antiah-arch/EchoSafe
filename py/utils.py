@@ -12,4 +12,4 @@ def success(msg: str) -> None:
     print(colored.stylize(msg, colored.fore("green")))
 
 def subtext(msg: str) -> None:
-print(colored.stylize(msg, colored.fore("dark_gray")))
+    print(colored.stylize(msg, colored.fore("dark_gray")))
