@@ -1,40 +1,59 @@
-
 import csv
 from collections import deque
-from time import time
+from time import time, sleep
 import serial
-from utils import error, warning, success, subtext  # use your fixed utils.py
+from utils import error, warning, success, subtext
 
 # ----------------------------
 # CONFIG
 # ----------------------------
-SERIAL_PORT = "COM3"       # change to your Arduino port
+SERIAL_PORT = "COM3"
 BAUD_RATE = 9600
-WINDOW_SIZE = 20           # rolling baseline samples
-CLAP_THRESHOLD = 200       # threshold for detecting claps
-OUTPUT_CSV = "output.csv"
 
-USE_ARDUINO = True  # Set True to read live from Arduino
+WINDOW_SIZE = 25
+CALIBRATION_SECONDS = 3
+CLAP_THRESHOLD_MULT = 2.8
+LED_ON_TIME = 0.3
+
+OUTPUT_CSV = "sounds_raw.csv"
+USE_ARDUINO = True
 
 # ----------------------------
-# MIC VALUES SETUP
+# SERIAL SETUP
 # ----------------------------
 if USE_ARDUINO:
     try:
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
-        mic_values = (int(line.strip()) for line in ser)
-        success("Connected to Arduino!")
-    except Exception as e:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        sleep(2)
+        success(f"Connected to Arduino on {SERIAL_PORT}")
+    except serial.SerialException as e:
         error(f"Failed to connect to Arduino: {e}")
-else:
-    # Test stream of mic values
-    mic_values = [100, 120, 130, 500, 110, 125, 600, 120]
-    warning("Using test mic values instead of Arduino")
+        exit(1)
 
 # ----------------------------
-# ROLLING WINDOW & TIMER
+# AUTO CALIBRATION
+# ----------------------------
+subtext("Calibrating noise floor...")
+calibration = []
+start = time()
+
+while time() - start < CALIBRATION_SECONDS:
+    line = ser.readline()
+    if line and line.strip().isdigit():
+        calibration.append(int(line))
+
+if not calibration:
+    error("Calibration failed: no data")
+
+baseline_noise = sum(calibration) / len(calibration)
+CLAP_THRESHOLD = baseline_noise * CLAP_THRESHOLD_MULT
+success(f"Noise floor: {baseline_noise:.1f} | Clap threshold: {CLAP_THRESHOLD:.1f}")
+
+# ----------------------------
+# WINDOW + TIMING
 # ----------------------------
 window = deque(maxlen=WINDOW_SIZE)
+last_led = 0
 start_time = time()
 
 # ----------------------------
@@ -42,29 +61,59 @@ start_time = time()
 # ----------------------------
 with open(OUTPUT_CSV, "w", newline="") as f:
     writer = csv.writer(f)
-    writer.writerow(["time", "mic_value", "clap_factor"])  # CSV header
+    writer.writerow([
+        "time",
+        "peak",
+        "duration",
+        "energy",
+        "sharpness",
+        "label"
+    ])
     subtext(f"Logging to {OUTPUT_CSV}")
 
     # ----------------------------
     # MAIN LOOP
     # ----------------------------
-    for mic in mic_values:
-        # Update rolling baseline
+    while True:
+        line = ser.readline()
+        if not line:
+            continue
+
+        try:
+            mic = int(line.decode("utf-8").strip())
+        except ValueError:
+            continue
+
         window.append(mic)
-        baseline = sum(window) / len(window)
 
-        # Compute clap factor
-        clap_factor = max(0.0, mic - baseline)
-        # Optional normalization: clap_factor = min(1.0, clap_factor / 300)
+        if len(window) < WINDOW_SIZE:
+            continue
 
-        # Current time
-        current_time = time() - start_time
+        peak = max(window)
+        energy = sum(abs(v - baseline_noise) for v in window)
+        duration = WINDOW_SIZE * 0.01
+        sharpness = peak / (baseline_noise + 1)
 
-        # Write to CSV
-        writer.writerow([current_time, mic, clap_factor])
+        now = time() - start_time
 
-        # Real-time detection
-        if clap_factor > CLAP_THRESHOLD:
-            success(f"CLAP DETECTED 👏 t={current_time:.3f}s, mic={mic}, factor={clap_factor:.1f}")
+        label = "unknown"
+
+        if peak > CLAP_THRESHOLD and duration < 0.25:
+            label = "clap"
+            success(f"CLAP 👏 peak={peak}")
+            if time() - last_led > LED_ON_TIME:
+                ser.write(b'1')
+                sleep(LED_ON_TIME)
+                ser.write(b'0')
+                last_led = time()
         else:
-            subtext(f"t={current_time:.3f}s, mic={mic}, factor={clap_factor:.1f}")
+            subtext(f"sound peak={peak}")
+
+        writer.writerow([
+            now,
+            peak,
+            duration,
+            energy,
+            sharpness,
+            label
+        ])

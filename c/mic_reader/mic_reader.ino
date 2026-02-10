@@ -1,12 +1,20 @@
-const int MIC_PIN = A0;
+const int micPin = A0;
+const int ledPin = 13;
 
 void setup() {
   Serial.begin(9600);
+  pinMode(ledPin, OUTPUT);
 }
 
 void loop() {
-  int micValue = analogRead(MIC_PIN);
+  int micValue = analogRead(micPin);
   Serial.println(micValue);
-  delay(10);  // ~100 samples/sec
-}
 
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == '1') digitalWrite(ledPin, HIGH);
+    if (c == '0') digitalWrite(ledPin, LOW);
+  }
+
+  delay(5);
+}
