@@ -1,21 +1,27 @@
-import os
+"""
+source.py
+---------
+Data source abstractions for EchoSafe's CLI pipeline.
+
+Defines the Source ADT (SerialSource, MicrophoneSource, FileSource),
+DataEntry (one timestamped mic reading), and DataStream (iterator + closer).
+"""
+
+import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from io import TextIOWrapper
 from time import time
-from typing import cast
 
-from serial import Serial
-from utils import error, success, warning
+import serial  # FIX 9: single serial import — use serial.Serial throughout
 
-BAUDRATE = 115200  # speed of communication over connection in baud
-QUANTITY: int = 0
-TIME_LABEL = "time"
-MIC_VALUE_LABEL = "mic_value"
-QUANTITY_LABEL = "label"
+from config import BAUDRATE
+from serial_helper import open_serial as _open_serial
+from utils import warning
 
 
-# Source ADT
+# ── Source ADT ─────────────────────────────────────────────────────────────────
+
 @dataclass(frozen=True)
 class SerialSource:
     port: str
@@ -36,134 +42,137 @@ class FileSource:
 Source = SerialSource | MicrophoneSource | FileSource
 
 
-def source_parser(source: str) -> Source:
-    stream = iter(source.split(":"))
-    first = next(stream, None)
-    match first:
-        case None:
-            error("empty source")
-        case "serial":
-            port = next(stream, None)
-            match port:
-                case None:
-                    error("serial: requires a COMPORT, eg. --source serial:COM0")
-                case _:
-                    return SerialSource(port)
-        case "file":
-            path = next(stream, None)
-            match path:
-                case None:
-                    error("file: requires a PATH, eg. --source file:./data.csv")
-                case _:
-                    return FileSource(path)
-        case "microphone":
-            submethod = next(stream, None)
-            match submethod:
-                case None:
-                    error(
-                        "microphone: requires a submethod eg. --source microphone:default"
-                    )
-                case "default":
-                    return MicrophoneSource(default=True)
-                case "index":
-                    i = next(stream, None)
-                    match i:
-                        case None:
-                            error(
-                                "microphone:index requires a number, eg. --source microphone:index:0"
-                            )
-                        case _:
-                            if not i.isdigit():
-                                error(f'{i} is not a digit in "microphone:index:{i}"')
-                            return MicrophoneSource(index=int(i))
-                case "name":
-                    name = next(stream, None)
-                    match name:
-                        case None:
-                            error(
-                                "microphone:index requires a name which may be a substring of the full system name, eg. --source microphone:name:built-in"
-                            )
-                        case _:
-                            return MicrophoneSource(substring=name)
-                case _:
-                    error(f"Unknown method {submethod}")
-        case _:
-            error(f"Unknown method {first}")
-
+# ── DataEntry ──────────────────────────────────────────────────────────────────
 
 @dataclass
 class DataEntry:
     time: float
     microphone: int
-    clap_confidence: float # score of how much of a clap it is.
+    clap_confidence: float  # score in 0..1 of how much of a clap it is
 
     @staticmethod
-    def from_csv_entry(s: str) -> "DataEntry|None":
-        parsed = s.strip().split(",")[:3]
-        raw_time, raw_microphone, raw_clap_confidence = parsed
-        # if any arent digits
-        if any(map(lambda a: not a.isdigit(), parsed)):
-            warning(f"could not parse mangled CSV entry {parsed} non-digit present.")
+    def from_csv_entry(s: str) -> "DataEntry | None":
+        parts = s.strip().split(",")
+
+        if len(parts) < 3:
+            warning(
+                f"could not parse CSV entry {parts!r}: "
+                f"expected 3 columns, got {len(parts)}."
+            )
             return None
-        else:
-            time = float(raw_time)
-            microphone = int(raw_microphone)
+
+        raw_time, raw_microphone, raw_clap_confidence = parts[:3]
+
+        try:
+            entry_time      = float(raw_time)
+            microphone      = int(raw_microphone)
             clap_confidence = float(raw_clap_confidence)
-            return DataEntry(time, microphone, clap_confidence)
+        except ValueError:
+            warning(
+                f"could not parse mangled CSV entry {parts!r}: "
+                "invalid numeric value."
+            )
+            return None
+
+        return DataEntry(entry_time, microphone, clap_confidence)
 
     def to_csv_entry(self) -> str:
+        # FIX 7: kept as a utility — useful for writing DataEntry back to CSV
+        # (e.g. in a future export or replay feature)
         return f"{self.time},{self.microphone},{self.clap_confidence}"
 
     @staticmethod
     def from_mic_iterable(microphone_values: Iterable[int]) -> "Iterator[DataEntry]":
+        # FIX 8: capture start inside the generator so timing begins when the
+        # first value is consumed, not when from_mic_iterable() is called
+        def _gen() -> Iterator["DataEntry"]:
+            start = time()
+            for mic in microphone_values:
+                yield DataEntry(time() - start, mic, 0.0)
+        return _gen()
+
+
+# ── Serial ─────────────────────────────────────────────────────────────────────
+
+def initiate_serial_connection(com_port: str) -> serial.Serial:
+    """
+    Open a serial connection via shared serial_helper.
+    FIX 5: error() from utils raises RuntimeError making sys.exit() after it
+    unreachable. Replaced with print() + sys.exit(1) for clarity.
+    FIX 9: returns serial.Serial (not the redundant Serial alias).
+    """
+    try:
+        return _open_serial(com_port, BAUDRATE)
+    except serial.SerialException as e:
+        print(f"Could not open serial port {com_port!r}: {e}")
+        sys.exit(1)
+
+
+def open_serial_data(serial_connection: serial.Serial) -> Iterator[DataEntry]:
+    """
+    FIX 1: replaced iter(callable, sentinel) pattern with an explicit generator.
+    The old iter(lambda: readline(), '') stopped permanently the moment Arduino
+    sent no data (timeout), silently terminating the stream.
+
+    FIX 2: replaced isdigit() filter with try/except int() so negative values
+    or unexpected formats produce a warning rather than silent drops.
+
+    FIX 3: removed redundant int() in from_mic_iterable — values are already
+    ints after the try/except parse below.
+    """
+    def _gen() -> Iterator[DataEntry]:
         start = time()
-        return map(
-            lambda mic: DataEntry(time() - start, int(mic), 0.0),
-            microphone_values,
-        )
+        while True:
+            raw = serial_connection.readline()
+            if not raw:
+                # Timeout with no data — keep waiting, don't terminate stream
+                continue
+            decoded = raw.decode(errors="ignore").strip()
+            if not decoded:
+                continue
+            try:
+                mic = int(decoded)
+            except ValueError:
+                # FIX 2: warn on unexpected format instead of silently dropping
+                warning(f"could not parse serial value {decoded!r}: not an integer")
+                continue
+            yield DataEntry(time() - start, mic, 0.0)
+
+    return _gen()
 
 
-def initiate_serial_connection(com_port: str) -> Serial:
-    serial_connection = Serial(com_port, BAUDRATE, timeout=1)
-    success(f"connected to device on port {com_port}")
-    return serial_connection
-
-
-def open_microphone_data(microphone_raw: str) -> Iterator[DataEntry]:
-    error("microphone not implemented")
-
-
-def open_serial_data(serial_connection: Serial) -> Iterator[DataEntry]:
-    microphone_values: Iterator[str] = iter(
-        lambda: serial_connection.readline().decode(errors="ignore").strip(), ""
-    )
-    
-    return DataEntry.from_mic_iterable(
-        map(
-            lambda mic: int(mic),
-            filter(lambda mic: mic.isdigit(), microphone_values),
-        )
-    )
-
+# ── File ───────────────────────────────────────────────────────────────────────
 
 def open_file_data(lines: TextIOWrapper) -> Iterator[DataEntry]:
     return (
-        cast(  # needed because pyright is unaware of the type narrowing in the filter
-            Iterator[DataEntry],
-            filter(
-                lambda x: isinstance(x, DataEntry),
-                map(lambda entry: DataEntry.from_csv_entry(entry), lines),
-            ),
-        )
+        entry
+        for entry in (DataEntry.from_csv_entry(line) for line in lines)
+        if entry is not None
     )
 
+
+# ── Microphone ─────────────────────────────────────────────────────────────────
+
+def open_microphone_data(source: MicrophoneSource) -> Iterator[DataEntry]:
+    # FIX 6: kept as a named stub so cli.py can reference it and future
+    # implementation has a clear home. NotImplementedError is intentional.
+    raise NotImplementedError(
+        "Microphone source is not yet implemented. "
+        "Use serial:COMPORT or file:PATH instead."
+    )
+
+
+# ── DataStream ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class DataStream:
     iterator: Iterator[DataEntry]
-    backer: TextIOWrapper | Serial
+    backer: TextIOWrapper | serial.Serial  # FIX 9: serial.Serial not the alias
 
-    def close(self):
-        self.backer.close()
-
-
+    def close(self) -> None:
+        # FIX 4: catch only the exceptions that can actually occur on close,
+        # not bare Exception which hides real bugs like AttributeError
+        try:
+            self.backer.close()
+        except (serial.SerialException, OSError) as e:
+            warning(f"Could not close data stream cleanly: {e}")

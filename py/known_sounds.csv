@@ -1,0 +1,105 @@
+filepath,label
+sounds/emergency_siren1.wav,Emergency Siren
+sounds/emergency_siren2.wav,Emergency Siren
+sounds/fire_alarm1.wav,Fire Alarm
+sounds/fire_alarm2.wav,Fire Alarm
+sounds/car_horn1.wav,Car Horn
+sounds/car_horn2.wav,Car Horn
+sounds/police_siren1.wav,Police Siren
+sounds/police_siren2.wav,Police Siren
+sounds/ambulance_siren1.wav,Ambulance Siren
+sounds/ambulance_siren2.wav,Ambulance Siren
+sounds/clap1.wav,Clap
+sounds/clap2.wav,Clap
+sounds/clap3.wav,Clap
+sounds/clap4.wav,Clap
+sounds/door_open1.wav,Door Open
+sounds/door_open2.wav,Door Open
+sounds/door_close1.wav,Door Close
+sounds/door_close2.wav,Door Close
+sounds/footsteps1.wav,Footsteps
+sounds/footsteps2.wav,Footsteps
+sounds/footsteps3.wav,Footsteps
+sounds/phone_ring1.wav,Phone Ring
+sounds/phone_ring2.wav,Phone Ring
+sounds/phone_ring3.wav,Phone Ring
+sounds/dog_bark1.wav,Dog Bark
+sounds/dog_bark2.wav,Dog Bark
+sounds/dog_bark3.wav,Dog Bark
+sounds/cat_meow1.wav,Cat Meow
+sounds/cat_meow2.wav,Cat Meow
+sounds/cat_meow3.wav,Cat Meow
+sounds/motorbike1.wav,Motorbike
+sounds/motorbike2.wav,Motorbike
+sounds/train1.wav,Train
+sounds/train2.wav,Train
+sounds/rain1.wav,Rain
+sounds/rain2.wav,Rain
+sounds/thunder1.wav,Thunder
+sounds/thunder2.wav,Thunder
+sounds/glass_break1.wav,Glass Break
+sounds/glass_break2.wav,Glass Break
+sounds/keyboard_typing1.wav,Typing
+sounds/keyboard_typing2.wav,Typing
+sounds/vacuum1.wav,Vacuum Cleaner
+sounds/vacuum2.wav,Vacuum Cleaner
+sounds/doorbell1.wav,Doorbell
+sounds/doorbell2.wav,Doorbell
+sounds/baby_cry1.wav,Baby Cry
+sounds/baby_cry2.wav,Baby Cry
+sounds/microwave1.wav,Microwave
+sounds/microwave2.wav,Microwave
+sounds/alarm_clock1.wav,Alarm Clock
+sounds/alarm_clock2.wav,Alarm Clock
+sounds/siren1.wav,Siren
+sounds/siren2.wav,Siren
+sounds/fire_cracker1.wav,Firecracker
+sounds/fire_cracker2.wav,Firecracker
+sounds/hammer1.wav,Hammer
+sounds/hammer2.wav,Hammer
+sounds/saw1.wav,Saw
+sounds/saw2.wav,Saw
+sounds/engine_start1.wav,Engine Start
+sounds/engine_start2.wav,Engine Start
+sounds/horn1.wav,Horn
+sounds/horn2.wav,Horn
+sounds/water_running1.wav,Water Running
+sounds/water_running2.wav,Water Running
+sounds/machine1.wav,Machine Noise
+sounds/machine2.wav,Machine Noise
+sounds/piano1.wav,Piano
+sounds/piano2.wav,Piano
+sounds/guitar1.wav,Guitar
+sounds/guitar2.wav,Guitar
+sounds/door_knock1.wav,Knock
+sounds/door_knock2.wav,Knock
+sounds/bell1.wav,Bell
+sounds/bell2.wav,Bell
+sounds/typing1.wav,Typing
+sounds/typing2.wav,Typing
+sounds/shutter1.wav,Camera Shutter
+sounds/shutter2.wav,Camera Shutter
+sounds/wind1.wav,Wind
+sounds/wind2.wav,Wind
+sounds/fireplace1.wav,Fireplace
+sounds/fireplace2.wav,Fireplace
+sounds/cheering1.wav,Cheering
+sounds/cheering2.wav,Cheering
+sounds/applause1.wav,Applause
+sounds/applause2.wav,Applause
+sounds/footsteps_gravel1.wav,Footsteps Gravel
+sounds/footsteps_gravel2.wav,Footsteps Gravel
+sounds/rain_heavy1.wav,Rain Heavy
+sounds/rain_heavy2.wav,Rain Heavy
+sounds/keyboard_click1.wav,Keyboard Click
+sounds/keyboard_click2.wav,Keyboard Click
+sounds/door_slam1.wav,Door Slam
+sounds/door_slam2.wav,Door Slam
+sounds/water_drip1.wav,Water Drip
+sounds/water_drip2.wav,Water Drip
+sounds/machine_hum1.wav,Machine Hum
+sounds/machine_hum2.wav,Machine Hum
+sounds/fan1.wav,Fan
+sounds/fan2.wav,Fan
+sounds/alarm_beep1.wav,Alarm Beep
+sounds/alarm_beep2.wav,Alarm Beep
