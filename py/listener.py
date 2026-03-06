@@ -153,7 +153,7 @@ def main() -> None:
                 and clap_prob >= confidence_threshold
                 and (time.time() - last_trigger) > COOLDOWN
             ):
-                print(f"👏 CLAP detected  (confidence={clap_prob:.0%})")
+                print(f" CLAP detected  (confidence={clap_prob:.0%})")
                 send(ser, b"1", verbose=verbose)
                 last_trigger = time.time()
             elif verbose and prediction == 1:

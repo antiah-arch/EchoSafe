@@ -1,15 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
 [project]
 name = "echosafe"
 version = "0.1.0"
-description = "Add your description here"
+description = "Arduino-based real-time clap detection and sound classification"
+requires-python = ">=3.10"
 readme = "README.md"
-requires-python = ">=3.13"
+license = { text = "MIT" }
+
 dependencies = [
-    "colored>=2.3.1",
-    "numpy>=2.3.5",
-    "pandas>=2.3.3",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+    "tensorflow>=2.13",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "sounddevice>=0.4.6",
     "pyserial>=3.5",
-    "scikit-learn>=1.8.0",
-    "scipy>=1.16.3",
-    "tensorflow>=2.20.0",
+    "colorama>=0.4.6",
 ]
+
+[project.scripts]
+# After `pip install -e .` these commands become available globally:
+echosafe        = "main:main"           # main CLI  (record / train / run / review)
+echosafe-train  = "trainer:main"        # train directly from CSVs
+echosafe-record = "recording:main"      # record from Arduino
+echosafe-listen = "listener:main"       # lightweight TFLite inference
+echosafe-review = "sounds_review:main"  # review and relabel wav files
+echosafe-ai     = "ai_classifier:main"  # full CNN classifier
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*.py"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.csv"]

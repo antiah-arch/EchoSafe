@@ -20,6 +20,7 @@ from collections import deque          # FIX 1: deque for bounded buffer
 from collections.abc import Iterator
 
 import joblib
+from model_versioning import versioned_save
 import numpy as np
 import pandas as pd
 from numpy.fft import rfft
@@ -32,6 +33,8 @@ from config import (
     FEATURE_COUNT,
     CLI_WINDOW_SIZE as WINDOW_SIZE,
     CLAP_MODEL_PATH,
+    CLAP_CONFIDENCE_BORDER_LOW,
+    CLAP_CONFIDENCE_BORDER_HIGH,
     SOUNDS_DB_DIR,
     CLAP_CSV,    # FIX 5 / CSV redirect: paths now point inside sounds_db/
     NOISE_CSV,
@@ -108,7 +111,7 @@ def train(
             # FIX 7: warn when confidence is borderline rather than silently
             # converting a fractional score to the wrong binary label
             conf = entry.clap_confidence
-            if 0.4 <= conf <= 0.6:
+            if CLAP_CONFIDENCE_BORDER_LOW <= conf <= CLAP_CONFIDENCE_BORDER_HIGH:
                 _write(output, f"Warning: borderline confidence {conf:.2f} "
                                f"labelled as {'clap' if conf > 0.5 else 'noise'}\n")
             y.append(1 if conf > 0.5 else 0)
@@ -124,7 +127,7 @@ def train(
         model.fit(X_arr, y_arr)
         # FIX 3: save to caller-specified path, not hardcoded MODEL_OUT
         os.makedirs(os.path.dirname(os.path.abspath(model_out)), exist_ok=True)
-        joblib.dump(model, model_out)
+        versioned_save(model_out, lambda p, m=model: joblib.dump(m, p))
         _write(output, f"Training complete. Model saved to {model_out}\n")
     else:
         _write(output, "Model type does not support .fit() — training skipped.\n")
@@ -211,7 +214,7 @@ def _train_from_csvs(
         print("\nClassification report:")
         print(classification_report(y_test, preds, target_names=["noise", "clap"]))
 
-    joblib.dump(model, model_out)
+    versioned_save(model_out, lambda p, m=model: joblib.dump(m, p))
     print(f"💾 Saved model to {model_out}")
 
 

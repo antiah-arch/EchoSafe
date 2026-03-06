@@ -34,6 +34,8 @@ from config import (
 )
 
 from serial_helper import open_serial, close_serial, reconnect_serial, send
+from model_versioning import versioned_save
+from label_ui import LabelWorker, SoundResult
 
 os.makedirs(SOUNDS_DB_DIR, exist_ok=True)
 
@@ -176,7 +178,7 @@ def shutdown(cnn_model, label_map: dict, ser, session_counts: dict) -> None:
     print("\n\n── Shutting down ──────────────────────────────")
     try:
         if label_map:
-            cnn_model.save(CNN_MODEL_FILE)
+            versioned_save(CNN_MODEL_FILE, lambda p, m=cnn_model: m.save(p))
             save_label_map(label_map, LABEL_MAP_FILE)
             print("💾 Model and label map saved.")
     except Exception as e:
@@ -214,6 +216,10 @@ def main() -> None:
 
     num_classes = max(len(label_map), 2)
     cnn_model = load_or_build_cnn(CNN_MODEL_FILE, num_classes)
+
+    # ── Label worker (must start before serial so it's ready immediately) ────
+    worker = LabelWorker(label_map, verbose=verbose)
+    worker.start()
 
     # ── Serial + calibration ──────────────────────────────────────────────────
     ser = open_serial(serial_port, BAUD_RATE)
@@ -370,35 +376,50 @@ def main() -> None:
                     log_detection(LOG_CSV, final_label, peak, duration, energy, sharpness)
                     session_counts[final_label] = session_counts.get(final_label, 0) + 1
 
+                    wav_path = None
                     if SAVE_WAV:
                         wav_path = save_wav(waveform, final_label)
                         if wav_path and verbose:
                             print(f"[verbose] Saved wav: {wav_path}")
 
-                    # ── Live training ─────────────────────────────────────────
-                    label_input = input("Label this sound (or ENTER to skip): ").strip()
-                    if label_input:
-                        if label_input not in label_map:
-                            label_map[label_input] = len(label_map)
+                    # ── Submit to label worker (non-blocking) ─────────────────
+                    worker.submit(SoundResult(
+                        waveform=waveform,
+                        specs_aug=specs_aug,
+                        final_label=final_label,
+                        confidence=confidence,
+                        peak=peak,
+                        duration=duration,
+                        wav_path=wav_path,
+                    ))
 
-                        if len(label_map) > cnn_model.output_shape[-1]:
-                            print(f"ℹ️  New label count ({len(label_map)}) — rebuilding CNN.")
-                            cnn_model = _build_cnn(len(label_map))
+            # ── Process label results from worker ──────────────────────────────
+            result = worker.poll()
+            if result is not None:
+                user_label = result.user_label
+                sound      = result.sound
 
-                        y_val = label_map[label_input]
-                        batch_arr = np.array(specs_aug).reshape(
-                            len(specs_aug), SPEC_H, SPEC_W, 1
-                        )
-                        y_batch = np.array([y_val] * len(specs_aug))
-                        cnn_model.fit(batch_arr, y_batch, epochs=TRAIN_EPOCHS, verbose=0)
-                        cnn_model.save(CNN_MODEL_FILE)
-                        save_label_map(label_map, LABEL_MAP_FILE)
-                        print(f"💾 Sound '{label_input}' trained and saved")
+                # Sync label_map — worker may have added a new label during prompt
+                label_map = worker.label_map
+
+                if len(label_map) > cnn_model.output_shape[-1]:
+                    print(f"ℹ️  New label count ({len(label_map)}) — rebuilding CNN.")
+                    cnn_model = _build_cnn(len(label_map))
+
+                y_val     = label_map[user_label]
+                batch_arr = np.array(sound.specs_aug).reshape(
+                    len(sound.specs_aug), SPEC_H, SPEC_W, 1
+                )
+                y_batch = np.array([y_val] * len(sound.specs_aug))
+                cnn_model.fit(batch_arr, y_batch, epochs=TRAIN_EPOCHS, verbose=0)
+                versioned_save(CNN_MODEL_FILE, lambda p, m=cnn_model: m.save(p))
+                save_label_map(label_map, LABEL_MAP_FILE)
+                print(f"💾 Sound '{user_label}' trained and saved")
 
             # ── AUTOSAVE ──────────────────────────────────────────────────────
             if time.time() - last_save > AUTOSAVE_INTERVAL:
                 if label_map:
-                    cnn_model.save(CNN_MODEL_FILE)
+                    versioned_save(CNN_MODEL_FILE, lambda p, m=cnn_model: m.save(p))
                     save_label_map(label_map, LABEL_MAP_FILE)
                     print("💾 CNN model autosaved")
                 last_save = time.time()
@@ -408,6 +429,8 @@ def main() -> None:
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
     finally:
+        print("Waiting for label worker to finish...")
+        worker.stop()
         shutdown(cnn_model, label_map, ser, session_counts)
 
 

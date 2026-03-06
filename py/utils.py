@@ -4,21 +4,57 @@ utils.py
 Shared console output utilities for EchoSafe.
 
 All user-facing messages should go through these functions so styling,
-stream routing (stdout vs stderr), and flush behaviour are consistent
-across the entire project.
+stream routing (stdout vs stderr), flush behaviour, and file logging are
+consistent across the entire project.
+
+Log file
+--------
+All output (including verbose debug messages) is also written to a rotating
+log file at LOG_PATH (default: echosafe.log). The file is capped at 1 MB
+with 3 backups kept, so it never fills the disk.
+
+To change the log path set the ECHOSAFE_LOG environment variable:
+    ECHOSAFE_LOG=/tmp/echosafe.log python ai_classifier.py
 
 Colours require colorama (pip install colorama). If it isn't installed
-all output falls back to plain text — no crash.
+all console output falls back to plain text — no crash.
 """
 
+import logging
+import logging.handlers
+import os
 import sys
 from typing import NoReturn
 
-# FIX 1: switched from `colored` (version-dependent, not installed) to
-# `colorama` which is already present, has a stable API, and works on Windows
+# ── Log file setup ────────────────────────────────────────────────────────────
+
+LOG_PATH = os.environ.get("ECHOSAFE_LOG", "echosafe.log")
+
+_file_handler = logging.handlers.RotatingFileHandler(
+    LOG_PATH,
+    maxBytes=1_000_000,   # 1 MB per file
+    backupCount=3,        # keep echosafe.log, echosafe.log.1, .2, .3
+    encoding="utf-8",
+    delay=True,           # don't create file until first message is written
+)
+_file_handler.setFormatter(
+    logging.Formatter(
+        fmt="%(asctime)s  %(levelname)-8s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+
+_logger = logging.getLogger("echosafe")
+_logger.setLevel(logging.DEBUG)
+_logger.addHandler(_file_handler)
+_logger.propagate = False   # don't bubble up to root logger
+
+
+# ── Colour setup ──────────────────────────────────────────────────────────────
+
 try:
     from colorama import Fore, Style, init as _colorama_init
-    _colorama_init(autoreset=True)   # resets colour after every print automatically
+    _colorama_init(autoreset=True)
     _COLOUR = True
 except ImportError:
     _COLOUR = False
@@ -35,44 +71,39 @@ def _style(msg: str, fore: str = "", dim: bool = False) -> str:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def error(msg: str) -> NoReturn:
-    """Print a red error message to stderr and exit with code 1."""
-    # FIX 2 / FIX 7: stderr + flush=True so it appears immediately before exit
+    """Print a red error message to stderr, log it, and exit with code 1."""
+    _logger.error(msg)
     print(_style(f"Error: {msg}", fore=Fore.RED if _COLOUR else ""),   # type: ignore[name-defined]
           file=sys.stderr, flush=True)
     sys.exit(1)
 
 
 def warning(msg: str) -> None:
-    """Print a yellow warning message to stderr."""
-    # FIX 2: warnings are diagnostic — they belong on stderr, not stdout,
-    # so they don't corrupt piped output in the CLI pipeline
-    # FIX 7: flush=True so warnings appear immediately before any crash
+    """Print a yellow warning to stderr and log it."""
+    _logger.warning(msg)
     print(_style(f"Warning: {msg}", fore=Fore.YELLOW if _COLOUR else ""),  # type: ignore[name-defined]
           file=sys.stderr, flush=True)
 
 
 def success(msg: str) -> None:
-    """Print a green success message to stdout."""
-    # FIX 7: flush=True so real-time detection output appears without buffering
+    """Print a green success message to stdout and log it."""
+    _logger.info(msg)
     print(_style(msg, fore=Fore.GREEN if _COLOUR else ""), flush=True)  # type: ignore[name-defined]
 
 
 def info(msg: str) -> None:
-    """
-    FIX 6: general informational message to stdout (cyan).
-    Use for status updates that aren't errors or successes —
-    e.g. 'Connecting to COM3...' or 'Loading model...'.
-    """
+    """Print a cyan informational message to stdout and log it."""
+    _logger.info(msg)
     print(_style(msg, fore=Fore.CYAN if _COLOUR else ""), flush=True)   # type: ignore[name-defined]
 
 
 def debug(msg: str, verbose: bool = False) -> None:
     """
-    FIX 6: verbose/debug message — only printed when verbose=True.
-    Replaces the scattered `if verbose: print(f'[verbose] ...')` pattern
-    across listener.py, recording.py, and ai_classifier.py.
-    Output is dim white to visually distinguish it from normal output.
+    Verbose/debug message — always written to log file, only printed to
+    console when verbose=True. Dim white to visually distinguish from
+    normal output.
     """
+    _logger.debug(msg)   # always log to file regardless of verbose flag
     if not verbose:
         return
     print(_style(msg, fore=Fore.WHITE if _COLOUR else "", dim=True),    # type: ignore[name-defined]
@@ -80,8 +111,5 @@ def debug(msg: str, verbose: bool = False) -> None:
 
 
 def subtext(msg: str) -> None:
-    """
-    FIX 3: kept for backward compatibility but now delegates to info().
-    Callers should migrate to info() or debug() as appropriate.
-    """
+    """Kept for backward compatibility — delegates to info()."""
     info(msg)

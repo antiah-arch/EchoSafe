@@ -37,6 +37,7 @@ COOLDOWN     = 1.0      # Minimum seconds between clap detections
 LED_ON_TIME  = 0.3      # Seconds the Arduino LED stays on after a clap
 
 CLAP_THRESHOLD_MULT = 2.8  # recording.py: peak must exceed baseline * this to be a clap
+CLAP_DURATION_MAX   = 0.25 # recording.py: clap spike must fall back below threshold within this many seconds
 TRIGGER_MULT        = 1.8  # ai_classifier.py: mic must exceed baseline * this to start recording
 SILENCE_MULT        = 1.2  # ai_classifier.py: mic must drop below baseline * this to stop
 
@@ -45,6 +46,8 @@ MAX_SOUND_SAMPLES = 4000   # Maximum samples before force-stop (~40 s @ 100 Hz)
 
 CNN_CONFIDENCE_THRESHOLD  = 0.6  # CNN predictions below this are labelled "uncertain"
 CLAP_CONFIDENCE_THRESHOLD = 0.7  # listener.py: TFLite clap probability must exceed this
+CLAP_CONFIDENCE_BORDER_LOW  = 0.4  # trainer.py: borderline confidence warning range (low)
+CLAP_CONFIDENCE_BORDER_HIGH = 0.6  # trainer.py: borderline confidence warning range (high)
 
 # ── Rolling noise ─────────────────────────────────────────────────────────────
 ROLLING_NOISE_LEN    = 200  # Deque length for dynamic baseline
@@ -56,9 +59,14 @@ LISTENER_MODEL_PATH = "sound_model.tflite"  # TFLite model used by listener.py
 CNN_MODEL_FILE  = "cnn_sound_model.h5"   # CNN spectrogram classifier
 LABEL_MAP_FILE  = "label_map.json"       # Class name ↔ index mapping
 
-SOUNDS_DB_DIR   = "sounds_db"            # Directory for wav files and CSVs
-LOG_CSV         = f"{SOUNDS_DB_DIR}/detections.csv"
-RAW_CSV         = "sounds_raw.csv"       # Output of recording.py
+SOUNDS_DB_DIR   = "sounds_db"            # Directory for all wav files and CSVs
+
+# All CSV outputs go inside SOUNDS_DB_DIR
+LOG_CSV         = f"{SOUNDS_DB_DIR}/detections.csv"   # ai_classifier.py detection log
+RAW_CSV         = f"{SOUNDS_DB_DIR}/sounds_raw.csv"   # recording.py raw mic data
+CLAP_CSV        = f"{SOUNDS_DB_DIR}/sound_data_label1.csv"  # trainer.py clap examples
+NOISE_CSV       = f"{SOUNDS_DB_DIR}/sound_data_label0.csv"  # trainer.py noise examples
+
 SAVE_WAV        = True                   # Set False to skip wav saving in ai_classifier.py
 
 # ── Training ──────────────────────────────────────────────────────────────────

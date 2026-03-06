@@ -32,7 +32,7 @@ import numpy as np
 
 # FIX 1: removed unused imports: shutil, pathlib.Path, soundfile
 # FIX 5: import shared constants from config instead of redefining them
-from config import SAMPLE_RATE, SOUNDS_DB_DIR as OUTPUT_DIR
+from config import SAMPLE_RATE, SOUNDS_DB_DIR as OUTPUT_DIR, CLAP_CSV, NOISE_CSV
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -186,8 +186,9 @@ def build_dataset(
         entries = list(csv.DictReader(f))
 
     # FIX 6: check which files are already in the output CSVs so we can skip them
-    clap_out  = os.path.join(output_dir, "sound_data_label1.csv")
-    noise_out = os.path.join(output_dir, "sound_data_label0.csv")
+    # Use config paths so filenames stay consistent with trainer.py
+    clap_out  = CLAP_CSV if output_dir == OUTPUT_DIR else os.path.join(output_dir, "sound_data_label1.csv")
+    noise_out = NOISE_CSV if output_dir == OUTPUT_DIR else os.path.join(output_dir, "sound_data_label0.csv")
     already_done = _load_processed_files(clap_out) | _load_processed_files(noise_out)
     if already_done:
         print(f"Resuming — {len(already_done)} file(s) already processed, skipping.")

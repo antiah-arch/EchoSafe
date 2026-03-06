@@ -23,6 +23,7 @@ from config import (
     RECORDING_WINDOW_SIZE as WINDOW_SIZE,
     CALIBRATION_SECONDS,
     CLAP_THRESHOLD_MULT,
+    CLAP_DURATION_MAX,
     LED_ON_TIME,
     RAW_CSV as OUTPUT_CSV,
 )
@@ -217,7 +218,7 @@ def record(
 
                 label = "unknown"
                 # Clap = short sharp spike that has already ended (falling edge)
-                if not above and duration > 0.0 and duration < 0.25:
+                if not above and duration > 0.0 and duration < CLAP_DURATION_MAX:
                     label = "clap"
                     success(f"CLAP 👏 peak={peak} dur={duration:.3f}s")
                     if not last_led:
