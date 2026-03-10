@@ -30,6 +30,7 @@ Usage:
 """
 
 import queue
+import re
 import threading
 from dataclasses import dataclass
 
@@ -188,6 +189,16 @@ class LabelWorker:
         if not raw:
             if self.verbose:
                 print("  (skipped)")
+            return None
+
+        # Sanitise label for use as a filename stem.
+        # Removes characters that are illegal on Windows (\/:*?"<>|)
+        # and replaces spaces/dots with underscores.
+        raw = re.sub(r'[\\/:*?"<>|]', '', raw)   # strip illegal chars
+        raw = re.sub(r'[\s.]+', '_', raw)           # spaces/dots → underscore
+        raw = raw.strip('_')                          # trim leading/trailing underscores
+        if not raw:
+            print("  Label contained only invalid characters — skipping.")
             return None
 
         is_new = raw not in self.label_map

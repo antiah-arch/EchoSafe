@@ -28,7 +28,7 @@ try:
 except ImportError:
     AUDIO_AVAILABLE = False
 
-from config import SOUNDS_DB_DIR, SAMPLE_RATE
+from config import SOUNDS_DB_DIR, PC_SAMPLE_RATE as SAMPLE_RATE
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ def review(directory: str, export_path: str | None) -> None:
         return
 
     print(f"\nFound {len(wav_files)} recording(s) in {directory!r}")
-    print("Commands:  [ENTER] keep label   [p] play   [r] relabel   [d] delete   [q] quit\n")
+    print("Commands:  [ENTER] play & keep   [r] relabel   [d] delete   [s] skip (keep without playing)   [q] quit\n")
 
     # Track any label changes made during review
     reviewed_labels: dict[str, str] = {}
@@ -121,18 +121,21 @@ def review(directory: str, export_path: str | None) -> None:
         current_label = wav.stem.rsplit("_", 1)[0]
 
         print(f"[{i+1}/{len(wav_files)}]  {wav.name}  label={current_label}")
+        play_wav(wav)   # auto-play on display
 
         cmd = input("  > ").strip().lower()
 
-        if cmd == "" :
-            # Keep as-is
+        if cmd == "":
+            # ENTER = keep as-is (sound already played above)
             reviewed_labels[str(wav)] = current_label
             kept.append(wav)
             i += 1
 
-        elif cmd == "p":
-            play_wav(wav)
-            # Don't advance — let user decide after listening
+        elif cmd == "s":
+            # Skip — keep without playing again
+            reviewed_labels[str(wav)] = current_label
+            kept.append(wav)
+            i += 1
 
         elif cmd == "r":
             new_label = input("  New label: ").strip()

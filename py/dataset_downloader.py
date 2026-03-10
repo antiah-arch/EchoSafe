@@ -32,7 +32,7 @@ import numpy as np
 
 # FIX 1: removed unused imports: shutil, pathlib.Path, soundfile
 # FIX 5: import shared constants from config instead of redefining them
-from config import SAMPLE_RATE, SOUNDS_DB_DIR as OUTPUT_DIR, CLAP_CSV, NOISE_CSV
+from config import PC_SAMPLE_RATE as SAMPLE_RATE, SOUNDS_DB_DIR as OUTPUT_DIR, CLAP_CSV, NOISE_CSV
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────

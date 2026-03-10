@@ -8,7 +8,9 @@ BAUD_RATE = 9600        # Arduino baud rate    (recording.py, ai_classifier.py, 
 BAUDRATE  = 115200      # High-speed baud rate (source.py / cli.py pipeline)
 
 # ── Audio — shared ────────────────────────────────────────────────────────────
-SAMPLE_RATE = 16000     # Hz — must match Arduino output and librosa expectations
+ARDUINO_SAMPLE_RATE    = 100    # Hz — Arduino ADC sample rate (10ms delay in sketch)
+ARDUINO_SAMPLE_INTERVAL = 1.0 / ARDUINO_SAMPLE_RATE  # seconds per sample (0.01)
+PC_SAMPLE_RATE      = 16000  # Hz — PC microphone rate (recognizer.py, librosa, ESC-50)
 
 CALIBRATION_SECONDS = 3 # Seconds of silence used to measure the noise floor
 
@@ -42,7 +44,7 @@ TRIGGER_MULT        = 1.8  # ai_classifier.py: mic must exceed baseline * this t
 SILENCE_MULT        = 1.2  # ai_classifier.py: mic must drop below baseline * this to stop
 
 MIN_SOUND_SAMPLES = 8      # Minimum samples before a recording is considered valid
-MAX_SOUND_SAMPLES = 4000   # Maximum samples before force-stop (~40 s @ 100 Hz)
+MAX_SOUND_SAMPLES = 4000   # Maximum samples before force-stop (~40 s @ ARDUINO_SAMPLE_RATE)
 
 CNN_CONFIDENCE_THRESHOLD  = 0.6  # CNN predictions below this are labelled "uncertain"
 CLAP_CONFIDENCE_THRESHOLD = 0.7  # listener.py: TFLite clap probability must exceed this

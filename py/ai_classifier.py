@@ -31,6 +31,7 @@ from config import (
     CLAP_MODEL_PATH, CNN_MODEL_FILE, LABEL_MAP_FILE,
     SOUNDS_DB_DIR, LOG_CSV, SAVE_WAV,
     HISTORY_LEN, TRAIN_EPOCHS, AUTOSAVE_INTERVAL,
+    PC_SAMPLE_RATE, ARDUINO_SAMPLE_RATE, ARDUINO_SAMPLE_INTERVAL,
 )
 
 from serial_helper import open_serial, close_serial, reconnect_serial, send
@@ -117,6 +118,31 @@ def _build_cnn(num_classes: int) -> tf.keras.Model:
     return model
 
 
+def expand_cnn_output(model: tf.keras.Model, new_num_classes: int) -> tf.keras.Model:
+    """
+    Add a new output neuron to the existing CNN rather than rebuilding from scratch.
+    Preserves all learned weights in the conv and dense layers — only the final
+    softmax layer is replaced, with existing class weights copied over.
+    This avoids catastrophic forgetting when a new label is added.
+    """
+    # Build a fresh model with the new output size
+    new_model = _build_cnn(new_num_classes)
+
+    # Copy weights from every layer except the final output layer
+    for old_layer, new_layer in zip(model.layers[:-1], new_model.layers[:-1]):
+        new_layer.set_weights(old_layer.get_weights())
+
+    # Copy existing output weights into the first N neurons of the new output layer
+    old_w, old_b = model.layers[-1].get_weights()   # shape: (64, old_n), (old_n,)
+    new_w, new_b = new_model.layers[-1].get_weights()  # shape: (64, new_n), (new_n,)
+    old_n = old_w.shape[1]
+    new_w[:, :old_n] = old_w
+    new_b[:old_n]    = old_b
+    new_model.layers[-1].set_weights([new_w, new_b])
+
+    return new_model
+
+
 def batch_predict(cnn_model, specs_aug: list) -> np.ndarray:
     batch = np.array(specs_aug).reshape(len(specs_aug), SPEC_H, SPEC_W, 1)
     return cnn_model.predict(batch, verbose=0)
@@ -124,7 +150,7 @@ def batch_predict(cnn_model, specs_aug: list) -> np.ndarray:
 
 def make_spectrograms(waveform: np.ndarray) -> list:
     try:
-        w_pitch = librosa.effects.pitch_shift(waveform, sr=16000, n_steps=2)
+        w_pitch = librosa.effects.pitch_shift(waveform, sr=PC_SAMPLE_RATE, n_steps=2)
         w_stretch = librosa.effects.time_stretch(waveform, rate=1.1)
         raw_waves = [waveform, w_pitch, w_stretch]
     except Exception:
@@ -134,7 +160,7 @@ def make_spectrograms(waveform: np.ndarray) -> list:
     for w in raw_waves:
         w = w + np.random.normal(0, 5.0, len(w))
         w_norm = w / (np.max(np.abs(w)) + 1e-6)
-        spec = librosa.feature.melspectrogram(y=w_norm.astype(float), sr=16000, n_mels=SPEC_H)
+        spec = librosa.feature.melspectrogram(y=w_norm.astype(float), sr=PC_SAMPLE_RATE, n_mels=SPEC_H)
         spec_db = librosa.power_to_db(spec)
         spec_resized = librosa.util.fix_length(spec_db, size=SPEC_W, axis=1)
         specs.append(spec_resized.reshape(SPEC_H, SPEC_W, 1))
@@ -167,7 +193,7 @@ def save_wav(waveform: np.ndarray, label: str) -> str | None:
         ts = int(time.time())
         safe_label = label.replace(" ", "_").replace("/", "-")
         path = os.path.join(SOUNDS_DB_DIR, f"{safe_label}_{ts}.wav")
-        sf.write(path, waveform / 1023.0, 16000)   # normalise Arduino 0-1023 → -1..1
+        sf.write(path, waveform / 1023.0, ARDUINO_SAMPLE_RATE)   # normalise Arduino 0-1023 → -1..1
         return path
     except Exception as e:
         print(f"Warning: could not save wav: {e}")
@@ -222,7 +248,7 @@ def main() -> None:
     worker.start()
 
     # ── Serial + calibration ──────────────────────────────────────────────────
-    ser = open_serial(serial_port, BAUD_RATE)
+    ser = open_serial(serial_port, BAUD_RATE, timeout=2.0)  # 2s timeout detects hung connections
 
     print("Calibrating noise floor (3 s) — stay quiet...")
     cal: list[int] = []
@@ -367,7 +393,7 @@ def main() -> None:
 
                     peak = float(max(current_sound))
                     energy = float(sum(abs(v - baseline_noise) for v in current_sound))
-                    duration = len(current_sound) * 0.01
+                    duration = len(current_sound) * ARDUINO_SAMPLE_INTERVAL
                     sharpness = peak / (baseline_noise + 1)
 
                     print(f"Detected: {final_label}  "
@@ -403,8 +429,9 @@ def main() -> None:
                 label_map = worker.label_map
 
                 if len(label_map) > cnn_model.output_shape[-1]:
-                    print(f"ℹ️  New label count ({len(label_map)}) — rebuilding CNN.")
-                    cnn_model = _build_cnn(len(label_map))
+                    print(f"ℹ️  New label '{user_label}' — expanding CNN output layer "
+                          f"({cnn_model.output_shape[-1]} → {len(label_map)} classes).")
+                    cnn_model = expand_cnn_output(cnn_model, len(label_map))
 
                 y_val     = label_map[user_label]
                 batch_arr = np.array(sound.specs_aug).reshape(
