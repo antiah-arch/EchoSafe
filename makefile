@@ -8,6 +8,8 @@
 PYTHON        := python
 PORT          ?= COM3        # override: make record PORT=COM5
 DURATION      ?= 60          # override: make record DURATION=120
+FILE          ?=              # override: make simulate FILE=sounds_db/sounds_raw.csv
+LABEL         ?= unknown      # override: make record LABEL=knock
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 
@@ -63,7 +65,7 @@ check:
 
 .PHONY: record
 record:
-	$(PYTHON) recording.py --port $(PORT) --duration $(DURATION)
+	$(PYTHON) recording.py --port $(PORT) --duration $(DURATION) --label $(LABEL)
 
 .PHONY: recognise
 recognise:
@@ -77,7 +79,7 @@ download:
 
 .PHONY: train
 train:
-	$(PYTHON) trainer.py
+	$(PYTHON) trainer.py --training-dir $(SOUNDS_DB)
 
 .PHONY: train-verbose
 train-verbose:
@@ -96,6 +98,14 @@ listen:
 .PHONY: review
 review:
 	$(PYTHON) sounds_review.py
+
+.PHONY: visualise
+visualise:
+	$(PYTHON) visualiser.py --port $(PORT)
+
+.PHONY: simulate
+simulate:
+	$(PYTHON) ai_classifier.py --simulate $(FILE)
 
 # ── Maintenance ───────────────────────────────────────────────────────────────
 

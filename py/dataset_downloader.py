@@ -32,7 +32,7 @@ import numpy as np
 
 # FIX 1: removed unused imports: shutil, pathlib.Path, soundfile
 # FIX 5: import shared constants from config instead of redefining them
-from config import PC_SAMPLE_RATE as SAMPLE_RATE, SOUNDS_DB_DIR as OUTPUT_DIR, CLAP_CSV, NOISE_CSV
+from config import PC_SAMPLE_RATE as SAMPLE_RATE, SOUNDS_DB_DIR as OUTPUT_DIR, TRAINING_DATA_DIR
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -46,23 +46,13 @@ ESC50_META_URL = (
     "https://raw.githubusercontent.com/karoldvl/ESC-50/master/meta/esc50.csv"
 )
 
-# ESC-50 category names → label 1 (clap)
-CLAP_CLASSES: set[str] = {
-    "clapping",
-    "hand_clapping",
-}
-
-# ESC-50 category names → label 0 (noise / background)
-NOISE_CLASSES: set[str] = {
-    "wind",
-    "rain",
-    "thunderstorm",
-    "water_drops",
-    "sea_waves",
-    "crackling_fire",
-    "crickets",
-    "birds",
-    "silence",
+# Default ESC-50 categories to download if --classes / --label-map are not given.
+# {echosafe_label: {esc50_category, ...}}
+DEFAULT_CLASS_MAP: dict[str, set[str]] = {
+    "clap":  {"clapping", "hand_clapping"},
+    "knock": {"door_knock", "knocking_on_door"},
+    "noise": {"wind", "rain", "thunderstorm", "water_drops",
+              "sea_waves", "crackling_fire", "crickets", "birds", "silence"},
 }
 
 CSV_FIELDS = ["mic_value", "label", "source_file"]
@@ -154,16 +144,16 @@ def list_classes() -> None:
         categories[cat] = categories.get(cat, 0) + 1
 
     print(f"\nESC-50 contains {len(categories)} unique categories:\n")
+    esc_to_label: dict[str, str] = {}
+    for lbl, cats in DEFAULT_CLASS_MAP.items():
+        for c in cats:
+            esc_to_label[c] = lbl
     for cat, count in sorted(categories.items()):
-        marker = ""
-        if cat in CLAP_CLASSES:
-            marker = "  ← default clap class"
-        elif cat in NOISE_CLASSES:
-            marker = "  ← default noise class"
+        lbl = esc_to_label.get(cat, "")
+        marker = f"  ← default label: {lbl!r}" if lbl else ""
         print(f"  {cat:<30} ({count} files){marker}")
     print(
-        f"\nPass category names to --clap-classes or --noise-classes to customise.\n"
-        f"Example: --clap-classes clapping --noise-classes wind rain thunderstorm"
+        "\nUse --classes ESC50_CAT [..] or --label-map LABEL=CAT[,..] to customise."
     )
 
 
@@ -171,122 +161,101 @@ def list_classes() -> None:
 
 def build_dataset(
     esc50_root: str,
-    clap_classes: set[str],
-    noise_classes: set[str],
+    class_map: dict[str, set[str]],
     output_dir: str,
 ) -> None:
+    """Convert ESC-50 audio → one label_<n>.csv per sound class."""
     meta_path = os.path.join(esc50_root, "meta", "esc50.csv")
     if not os.path.exists(meta_path):
-        print(f"Error: could not find ESC-50 metadata at {meta_path}")
+        print(f"Error: ESC-50 metadata not found at {meta_path}")
         sys.exit(1)
-
     audio_dir = os.path.join(esc50_root, "audio")
-
     with open(meta_path, newline="") as f:
         entries = list(csv.DictReader(f))
 
-    # FIX 6: check which files are already in the output CSVs so we can skip them
-    # Use config paths so filenames stay consistent with trainer.py
-    clap_out  = CLAP_CSV if output_dir == OUTPUT_DIR else os.path.join(output_dir, "sound_data_label1.csv")
-    noise_out = NOISE_CSV if output_dir == OUTPUT_DIR else os.path.join(output_dir, "sound_data_label0.csv")
-    already_done = _load_processed_files(clap_out) | _load_processed_files(noise_out)
+    # Build reverse map: esc50_category → echosafe_label
+    cat_to_label: dict[str, str] = {}
+    for label_name, cats in class_map.items():
+        for cat in cats:
+            cat_to_label[cat.lower().replace(" ", "_")] = label_name
+
+    all_labels = sorted(class_map.keys())
+    out_paths  = {name: os.path.join(output_dir, f"label_{name}.csv") for name in all_labels}
+
+    # Resume: collect already-processed filenames
+    already_done: set[str] = set()
+    for path in out_paths.values():
+        already_done |= _load_processed_files(path)
     if already_done:
         print(f"Resuming — {len(already_done)} file(s) already processed, skipping.")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # FIX 8: open both CSVs for incremental writing
-    clap_mode  = "a" if os.path.exists(clap_out)  else "w"
-    noise_mode = "a" if os.path.exists(noise_out) else "w"
-    clap_file  = open(clap_out,  clap_mode,  newline="")
-    noise_file = open(noise_out, noise_mode, newline="")
-    clap_writer  = csv.DictWriter(clap_file,  fieldnames=CSV_FIELDS)
-    noise_writer = csv.DictWriter(noise_file, fieldnames=CSV_FIELDS)
-    if clap_mode  == "w": clap_writer.writeheader()
-    if noise_mode == "w": noise_writer.writeheader()
+    # Open one CSV per label
+    open_files: dict[str, object] = {}
+    writers: dict[str, csv.DictWriter] = {}
+    for name, path in out_paths.items():
+        mode = "a" if os.path.exists(path) else "w"
+        fh = open(path, mode, newline="")
+        open_files[name] = fh
+        writers[name] = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        if mode == "w":
+            writers[name].writeheader()
 
     skipped = 0
-    clap_count = 0
-    noise_count = 0
-    warnings: list[str] = []   # FIX 9: collect warnings, print after progress line
+    counts: dict[str, int] = {name: 0 for name in all_labels}
+    warnings_list: list[str] = []
 
-    print(f"Processing {len(entries)} ESC-50 files...")
+    print(f"Processing {len(entries)} ESC-50 files → labels: {all_labels}")
 
     try:
         for i, entry in enumerate(entries):
             category = entry["category"].lower().replace(" ", "_")
             filename  = entry["filename"]
             filepath  = os.path.join(audio_dir, filename)
-
-            # FIX 9: print progress on its own line, warnings collected separately
             print(f"  [{i+1}/{len(entries)}] {filename} ({category})          ", end="\r")
 
-            if category not in clap_classes and category not in noise_classes:
+            if category not in cat_to_label:
                 skipped += 1
                 continue
-
-            # FIX 6: skip files already written in a previous run
             if filename in already_done:
                 skipped += 1
                 continue
-
             if not os.path.exists(filepath):
-                warnings.append(f"  Warning: file not found: {filepath}")
+                warnings_list.append(f"  Warning: file not found: {filepath}")
                 skipped += 1
                 continue
 
             try:
+                lbl_name   = cat_to_label[category]
                 waveform   = load_and_resample(filepath)
-                mic_values = waveform_to_mic_values(waveform)   # FIX 4: clipped
-                label      = 1 if category in clap_classes else 0
-                writer     = clap_writer if label == 1 else noise_writer
-
+                mic_values = waveform_to_mic_values(waveform)
                 for val in mic_values:
-                    writer.writerow({
+                    writers[lbl_name].writerow({
                         "mic_value":   val,
-                        "label":       label,
+                        "label":       lbl_name,
                         "source_file": filename,
                     })
-
-                # FIX 8: flush after each file so data isn't lost on crash
-                (clap_file if label == 1 else noise_file).flush()
-
-                if label == 1:
-                    clap_count += len(mic_values)
-                else:
-                    noise_count += len(mic_values)
-
+                open_files[lbl_name].flush()
+                counts[lbl_name] += len(mic_values)
             except Exception as e:
-                warnings.append(f"  Warning: could not process {filename}: {e}")
+                warnings_list.append(f"  Warning: could not process {filename}: {e}")
                 skipped += 1
 
     finally:
-        clap_file.close()
-        noise_file.close()
+        for fh in open_files.values():
+            fh.close()
 
-    # FIX 9: print all collected warnings after the progress line is done
-    print()  # newline after final \r progress
-    for w in warnings:
+    print()
+    for w in warnings_list:
         print(w)
-
-    print(f"Done. Skipped {skipped} file(s) (not in selected classes or already done).")
-
-    if clap_count == 0:
-        print(
-            "Warning: no clap samples written. "
-            f"Selected clap classes were: {sorted(clap_classes)}\n"
-            "Run with --list-classes to see available categories."
-        )
-    if noise_count == 0:
-        print("Warning: no noise samples written.")
-
-    print(
-        f"\n✅ Dataset ready.\n"
-        f"   Clap samples : {clap_count:,}  → {clap_out}\n"
-        f"   Noise samples: {noise_count:,}  → {noise_out}\n"
-        f"\nRun trainer.py to train your model."
-    )
-
+    print(f"Done. Skipped {skipped} file(s).")
+    for name in all_labels:
+        if counts[name] == 0:
+            print(f"  ⚠️  No samples for label {name!r}. Check --list-classes.")
+        else:
+            print(f"  ✅ {name}: {counts[name]:,} samples → {out_paths[name]}")
+    print("\nRun trainer.py to train your model.")
 
 def _load_processed_files(csv_path: str) -> set[str]:
     """Return the set of source_file values already written to a CSV."""
@@ -327,37 +296,42 @@ def parse_args() -> argparse.Namespace:
         help="keep the downloaded .tar.gz after extraction",
     )
     parser.add_argument(
-        "--clap-classes",
-        nargs="+",
-        default=sorted(CLAP_CLASSES),
-        help="ESC-50 category names to treat as clap / label 1",
+        "--classes",
+        nargs="+", default=None, metavar="CAT",
+        help="ESC-50 category names to download (each becomes its own label).",
     )
     parser.add_argument(
-        "--noise-classes",
-        nargs="+",
-        default=sorted(NOISE_CLASSES),
-        help="ESC-50 category names to treat as noise / label 0",
+        "--label-map", nargs="+", default=None, metavar="LABEL=CAT[,CAT]",
+        help="explicit label→category mapping e.g. knock=door_knock noise=wind,rain.",
     )
     return parser.parse_args()
 
 
+def _build_class_map(args) -> dict[str, set[str]]:
+    if args.label_map:
+        cm: dict[str, set[str]] = {}
+        for token in args.label_map:
+            label, _, cats_str = token.partition("=")
+            if not cats_str:
+                print(f"Error: --label-map token {token!r} must be label=cat[,cat2]")
+                sys.exit(1)
+            cm[label.strip()] = {c.strip() for c in cats_str.split(",")}
+        return cm
+    if args.classes:
+        return {cat.lower().replace(" ", "_"): {cat} for cat in args.classes}
+    return DEFAULT_CLASS_MAP
+
+
 if __name__ == "__main__":
     args = parse_args()
-
-    # FIX 7: handle --list-classes early, before any download
     if args.list_classes:
         list_classes()
         sys.exit(0)
-
+    class_map = _build_class_map(args)
+    print(f"Label map: { {k: sorted(v) for k, v in class_map.items()} }")
     download_esc50()
     esc50_root = extract_esc50()
-    build_dataset(
-        esc50_root=esc50_root,
-        clap_classes=set(args.clap_classes),
-        noise_classes=set(args.noise_classes),
-        output_dir=args.output_dir,
-    )
-
+    build_dataset(esc50_root=esc50_root, class_map=class_map, output_dir=args.output_dir)
     if not args.keep_archive and os.path.exists(ESC50_ARCHIVE):
         os.remove(ESC50_ARCHIVE)
         print(f"Removed archive {ESC50_ARCHIVE}")

@@ -16,7 +16,7 @@ from config import (
     CLAP_CONFIDENCE_THRESHOLD,  # FIX 4: threshold so weak predictions don't trigger
     LISTENER_MODEL_PATH,        # FIX 3: model path from config, not hardcoded string
 )
-from serial_helper import open_serial, close_serial, reconnect_serial, send
+from serial_helper import open_serial, close_serial, reconnect_serial, send, auto_detect_port
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -96,6 +96,11 @@ def main() -> None:
     # FIX 1 & 2: buffer sized to CLAP_WINDOW (64), not WINDOW_SIZE (512)
     buffer: deque = deque(maxlen=CLAP_WINDOW)
 
+    if port == COM_PORT:
+        detected = auto_detect_port(BAUD_RATE)
+        if detected and detected != port:
+            print(f"Auto-detected Arduino on {detected}")
+            port = detected
     ser = open_serial(port, BAUD_RATE)
     atexit.register(close_serial, ser)
 
@@ -144,20 +149,28 @@ def main() -> None:
                 prob_str = "  ".join(f"class{i}={p:.0%}" for i, p in enumerate(output))
                 print(f"\n[verbose] probs  {prob_str}")
 
-            prediction = int(np.argmax(output))
-            clap_prob  = float(output[1]) if len(output) > 1 else float(output[0])
+            pred_idx   = int(np.argmax(output))
+            confidence = float(output[pred_idx])
 
-            # FIX 4: only trigger if confidence exceeds threshold
+            # Load label names from model bundle if available
+            pred_label = getattr(interp, '_label_names', None)
+            pred_label = pred_label[pred_idx] if pred_label else f'class{pred_idx}'
+            is_noise   = pred_label in ('noise', 'background', 'silence', 'class0')
+
+            if verbose:
+                prob_str = '  '.join(f'class{i}={p:.0%}' for i, p in enumerate(output))
+                print(f"\n[verbose] {pred_label} ({confidence:.0%})  {prob_str}")
+
             if (
-                prediction == 1
-                and clap_prob >= confidence_threshold
+                not is_noise
+                and confidence >= confidence_threshold
                 and (time.time() - last_trigger) > COOLDOWN
             ):
-                print(f" CLAP detected  (confidence={clap_prob:.0%})")
+                print(f"🔊 Detected: {pred_label}  (confidence={confidence:.0%})")
                 send(ser, b"1", verbose=verbose)
                 last_trigger = time.time()
-            elif verbose and prediction == 1:
-                print(f"[verbose] Clap suppressed — confidence {clap_prob:.0%} "
+            elif verbose and not is_noise:
+                print(f"[verbose] '{pred_label}' suppressed — confidence {confidence:.0%} "
                       f"below threshold {confidence_threshold:.0%}")
 
     except KeyboardInterrupt:

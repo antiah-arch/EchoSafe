@@ -20,14 +20,15 @@ import serial
 
 from config import (
     COM_PORT, BAUD_RATE,
+    SOUNDS_DB_DIR, TRAINING_DATA_DIR,
     RECORDING_WINDOW_SIZE as WINDOW_SIZE,
     CALIBRATION_SECONDS,
     CLAP_THRESHOLD_MULT,
     CLAP_DURATION_MAX,
     LED_ON_TIME,
-    RAW_CSV as OUTPUT_CSV,
+    RAW_CSV,
 )
-from serial_helper import open_serial, close_serial, reconnect_serial, send
+from serial_helper import open_serial, close_serial, reconnect_serial, send, auto_detect_port
 from utils import success
 
 
@@ -51,10 +52,18 @@ def parse_args() -> argparse.Namespace:
         help=f"baud rate (default: {BAUD_RATE})",
     )
     parser.add_argument(
+        "--label",
+        default=None,
+        metavar="NAME",
+        help="sound label for this recording session e.g. clap, knock, whistle. "
+             f"Saves to {TRAINING_DATA_DIR}/label_<NAME>.csv. "
+             "If not given, saves to RAW_CSV with label=unknown.",
+    )
+    parser.add_argument(
         "--output",
-        default=OUTPUT_CSV,
+        default=None,
         metavar="CSV_PATH",
-        help=f"CSV file to append rows to (default: {OUTPUT_CSV})",
+        help="explicit CSV path (overrides --label derived path)",
     )
     parser.add_argument(
         "--duration",
@@ -92,7 +101,8 @@ def _read_int(ser: serial.Serial) -> int | None:
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def record(
-    output_csv: str = OUTPUT_CSV,
+    label: str | None = None,
+    output_csv: str | None = None,
     port: str = COM_PORT,
     baud: int = BAUD_RATE,
     duration_seconds: int | None = None,
@@ -102,15 +112,34 @@ def record(
     Record raw mic data from Arduino to CSV.
 
     Args:
-        output_csv:       path to write rows to (appended, not overwritten)
+        label:            sound label for this session (e.g. "clap", "knock").
+                          Determines output CSV path as label_<name>.csv.
+        output_csv:       explicit CSV path; overrides label-derived path.
         port:             serial port the Arduino is connected to
         baud:             baud rate
         duration_seconds: stop after this many seconds; None = run until Ctrl+C
         verbose:          print every window's features to console
     """
 
+    # ── Derive output CSV from label if not given explicitly ─────────────────
+    import re as _re
+    if output_csv is None:
+        if label:
+            safe = _re.sub(r'[^\w-]', '_', label.strip()).strip('_') or 'unknown'
+            output_csv = os.path.join(TRAINING_DATA_DIR, f"label_{safe}.csv")
+            print(f"Label: {label!r}  →  {output_csv}")
+        else:
+            output_csv = RAW_CSV
+            print(f"No --label given — saving to {RAW_CSV} with label=unknown")
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+
     # ── Serial setup ──────────────────────────────────────────────────────────
     try:
+        if port == COM_PORT:
+            detected = auto_detect_port(baud)
+            if detected and detected != port:
+                print(f"Auto-detected Arduino on {detected}")
+                port = detected
         ser = open_serial(port, baud)
     except serial.SerialException as e:
         print(f"Failed to connect to Arduino: {e}")
@@ -146,9 +175,7 @@ def record(
     deadline    = (start_time + duration_seconds) if duration_seconds else None
 
     # ── CSV setup ─────────────────────────────────────────────────────────────
-    # FIX 10: check file size before opening so header detection is reliable
     needs_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
-    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
 
     try:
         with open(output_csv, "a", newline="") as f:
@@ -216,26 +243,25 @@ def record(
 
                 prev_above = above
 
-                label = "unknown"
-                # Clap = short sharp spike that has already ended (falling edge)
+                # Use the session label if given; otherwise try to infer from signal
+                row_label = label if label else "unknown"
+                # Still detect and flag claps for reference even in labelled sessions
                 if not above and duration > 0.0 and duration < CLAP_DURATION_MAX:
-                    label = "clap"
                     success(f"CLAP 👏 peak={peak} dur={duration:.3f}s")
                     if not last_led:
                         send(ser, b"1")
                         last_led = time()
                 elif verbose:
-                    # FIX 8: only print per-window noise if --verbose
                     print(f"  peak={peak:.0f}  dur={duration:.3f}s  "
-                          f"energy={energy:.1f}  label={label}", end="\r")
+                          f"energy={energy:.1f}  label={row_label}", end="\r")
 
                 writer.writerow([
                     round(now, 3),
                     peak,
                     round(duration, 4),
-                    round(energy, 4),   # FIX 7: now mean, not sum
+                    round(energy, 4),
                     round(sharpness, 4),
-                    label,
+                    row_label,
                 ])
                 f.flush()
 
@@ -253,6 +279,7 @@ def record(
 def main() -> int:
     args = parse_args()
     record(
+        label=args.label,
         output_csv=args.output,
         port=args.port,
         baud=args.baud,

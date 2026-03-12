@@ -22,19 +22,21 @@ from collections import deque
 
 from config import (
     COM_PORT, BAUD_RATE,
+    MIN_TRAINING_CONFIDENCE,
     SPEC_H, SPEC_W,
-    COOLDOWN, CLAP_WINDOW, FEATURE_COUNT,
+    COOLDOWN, CLAP_WINDOW, FFT_STRIDE, FEATURE_COUNT,
+    DERIVATIVE_WINDOW, SPIKE_THRESHOLD_MULT, SPIKE_COOLDOWN, SPIKE_MIN_GAP,
     TRIGGER_MULT, SILENCE_MULT,
     MIN_SOUND_SAMPLES, MAX_SOUND_SAMPLES,
     CNN_CONFIDENCE_THRESHOLD,
     ROLLING_NOISE_LEN, BASELINE_UPDATE_EVERY,
-    CLAP_MODEL_PATH, CNN_MODEL_FILE, LABEL_MAP_FILE,
+    CLAP_MODEL_PATH, SOUND_MODEL_PATH, CNN_MODEL_FILE, LABEL_MAP_FILE,
     SOUNDS_DB_DIR, LOG_CSV, SAVE_WAV,
     HISTORY_LEN, TRAIN_EPOCHS, AUTOSAVE_INTERVAL,
-    PC_SAMPLE_RATE, ARDUINO_SAMPLE_RATE, ARDUINO_SAMPLE_INTERVAL,
+    ARDUINO_SAMPLE_RATE, ARDUINO_SAMPLE_INTERVAL, PC_SAMPLE_RATE,
 )
 
-from serial_helper import open_serial, close_serial, reconnect_serial, send
+from serial_helper import open_serial, close_serial, reconnect_serial, send, auto_detect_port
 from model_versioning import versioned_save
 from label_ui import LabelWorker, SoundResult
 
@@ -59,22 +61,53 @@ def parse_args() -> argparse.Namespace:
         help=f"serial port to use (default: {COM_PORT})",
     )
     parser.add_argument(
+        "--simulate",
+        metavar="CSV",
+        default=None,
+        help="replay a recorded CSV instead of live Arduino serial"
+    )
+    parser.add_argument(
         "--confidence",
         type=float,
         default=CNN_CONFIDENCE_THRESHOLD,
         metavar="THRESHOLD",
-        help=f"CNN confidence threshold 0-1 (default: {CNN_CONFIDENCE_THRESHOLD})",
+        help=f"CNN confidence threshold 0-1 (default: {CNN_CONFIDENCE_THRESHOLD}) "
+             "applies to both FFT and CNN classifiers",
+    )
+    parser.add_argument(
+        "--export-tflite",
+        metavar="PATH",
+        default=None,
+        help="after session ends, export CNN to TFLite at this path "
+             f"(default: {None} — no export)"
     )
     return parser.parse_args()
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
-def load_clap_model(path: str):
-    if not os.path.exists(path):
-        print(f"Error: clap model not found at {path!r}. Run trainer.py first.")
-        sys.exit(1)
-    return joblib.load(path)
+def load_sound_model(path: str) -> tuple:
+    """
+    Load the multi-class sound model bundle.
+    Returns (sklearn_model, label_names) where label_names is a list of
+    class name strings in index order.
+
+    Handles both:
+      - New bundle format: {'model': model, 'label_names': [...]}
+      - Legacy format: raw joblib model (binary clap/noise)
+    """
+    # Try new path first, fall back to legacy clap_model.pkl
+    for try_path in [path, CLAP_MODEL_PATH]:
+        if os.path.exists(try_path):
+            obj = joblib.load(try_path)
+            if isinstance(obj, dict) and 'model' in obj:
+                return obj['model'], obj.get('label_names', ['noise', 'sound'])
+            # Legacy: raw model, assume binary noise/clap
+            print(f"Warning: legacy model format at {try_path!r} "
+                  "— classes assumed to be ['noise', 'clap']")
+            return obj, ['noise', 'clap']
+    print(f"Error: sound model not found at {path!r}. Run trainer.py first.")
+    sys.exit(1)
 
 
 def load_label_map(path: str) -> dict:
@@ -168,21 +201,25 @@ def make_spectrograms(waveform: np.ndarray) -> list:
 
 
 def log_detection(path: str, label: str, peak: float, duration: float,
-                  energy: float, sharpness: float) -> None:
+                  energy: float, sharpness: float,
+                  num_samples: int = 0, baseline: float = 0.0) -> None:
     file_exists = os.path.exists(path)
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["time", "label", "peak", "duration", "energy", "sharpness"]
+            f, fieldnames=["time", "label", "peak", "duration", "energy",
+                           "sharpness", "num_samples", "baseline"]
         )
         if not file_exists:
             writer.writeheader()
         writer.writerow({
-            "time": round(time.time(), 3),
-            "label": label,
-            "peak": round(peak, 2),
-            "duration": round(duration, 3),
-            "energy": round(energy, 2),
-            "sharpness": round(sharpness, 4),
+            "time":        round(time.time(), 3),
+            "label":       label,
+            "peak":        round(peak, 2),
+            "duration":    round(duration, 3),
+            "energy":      round(energy, 2),
+            "sharpness":   round(sharpness, 4),
+            "num_samples": num_samples,
+            "baseline":    round(baseline, 2),
         })
 
 
@@ -198,6 +235,42 @@ def save_wav(waveform: np.ndarray, label: str) -> str | None:
     except Exception as e:
         print(f"Warning: could not save wav: {e}")
         return None
+
+
+def _simulate_source(csv_path: str):
+    """
+    Replay a recorded CSV as a fake serial source for --simulate mode.
+    Yields integers at ARDUINO_SAMPLE_RATE so timing mirrors a live session.
+    """
+    import csv as _csv
+    if not os.path.exists(csv_path):
+        print(f"Error: simulate file not found: {csv_path!r}")
+        sys.exit(1)
+    with open(csv_path, newline='') as f:
+        reader = _csv.DictReader(f)
+        if 'mic_value' not in (reader.fieldnames or []):
+            print(f"Error: CSV has no 'mic_value' column: {csv_path!r}")
+            sys.exit(1)
+        for row in reader:
+            val = row['mic_value'].strip()
+            if val.isdigit():
+                yield int(val)
+            time.sleep(ARDUINO_SAMPLE_INTERVAL)
+
+
+def export_tflite(keras_model: tf.keras.Model, out_path: str) -> None:
+    """
+    Convert a trained Keras CNN to TFLite so listener.py can use it.
+    Saves to out_path (e.g. 'sound_model.tflite').
+    """
+    print(f"Converting CNN to TFLite → {out_path}...")
+    converter = tf.lite.TFLiteConverter.from_keras_model(keras_model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]   # float16 quantisation
+    tflite_model = converter.convert()
+    with open(out_path, 'wb') as f:
+        f.write(tflite_model)
+    size_kb = len(tflite_model) / 1024
+    print(f"✅ TFLite model saved: {out_path} ({size_kb:.1f} KB)")
 
 
 def shutdown(cnn_model, label_map: dict, ser, session_counts: dict) -> None:
@@ -237,7 +310,7 @@ def main() -> None:
     serial_port: str = args.port
 
     # ── Load models & state ───────────────────────────────────────────────────
-    clap_model = load_clap_model(CLAP_MODEL_PATH)
+    sound_model, fft_label_names = load_sound_model(SOUND_MODEL_PATH)
     label_map: dict = load_label_map(LABEL_MAP_FILE)
 
     num_classes = max(len(label_map), 2)
@@ -248,7 +321,19 @@ def main() -> None:
     worker.start()
 
     # ── Serial + calibration ──────────────────────────────────────────────────
-    ser = open_serial(serial_port, BAUD_RATE, timeout=2.0)  # 2s timeout detects hung connections
+    # ── Simulate mode or live serial ─────────────────────────────────────
+    simulate_iter = None
+    if args.simulate:
+        print(f"🔁 Simulate mode — replaying {args.simulate!r}")
+        simulate_iter = _simulate_source(args.simulate)
+        ser = None
+    else:
+        if serial_port == COM_PORT:
+            detected = auto_detect_port(BAUD_RATE)
+            if detected and detected != serial_port:
+                print(f"Auto-detected Arduino on {detected} (overrides config COM_PORT)")
+                serial_port = detected
+        ser = open_serial(serial_port, BAUD_RATE, timeout=2.0)
 
     print("Calibrating noise floor (3 s) — stay quiet...")
     cal: list[int] = []
@@ -276,7 +361,13 @@ def main() -> None:
         print(f"[verbose] silence level        : {baseline_noise * SILENCE_MULT:.1f}")
 
     # ── Runtime state ─────────────────────────────────────────────────────────
-    fft_buffer: deque = deque(maxlen=CLAP_WINDOW)
+    fft_buffer: deque     = deque(maxlen=CLAP_WINDOW)
+    # Derivative spike detector state
+    deriv_buf: deque      = deque(maxlen=DERIVATIVE_WINDOW + 1)  # +1 for diff
+    spike_count           = 0       # spikes detected in current sound event
+    last_spike_time       = 0.0
+    last_spike_sample     = -SPIKE_MIN_GAP  # sample index of last spike
+    sample_index          = 0       # global sample counter for spike gap check
     pred_history: deque = deque(maxlen=HISTORY_LEN)
     current_sound: list[int] = []
     recording = False
@@ -284,29 +375,35 @@ def main() -> None:
     last_clap = time.time()
     dynamic_baseline = baseline_noise
     baseline_update_counter = 0
-    fft_sample_count = 0
+    fft_sample_count     = 0       # counts samples since last FFT window was run
     session_counts: dict[str, int] = {}
 
     print("🎧 Listening...  (Ctrl+C to stop)\n")
 
     try:
         while True:
-            # ── Serial read with reconnection ─────────────────────────────────
-            try:
-                raw = ser.readline()
-            except (_serial_mod.SerialException, OSError):
-                ser = reconnect_serial(serial_port, BAUD_RATE)
-                if ser is None:
+            # ── Read next sample — serial or simulate ────────────────────────
+            if simulate_iter is not None:
+                try:
+                    mic = next(simulate_iter)
+                except StopIteration:
+                    print("\n🔁 Simulation complete.")
                     break
-                rolling_noise.clear()
-                continue
-
-            if not raw:
-                continue
-            decoded = raw.decode(errors="ignore").strip()
-            if not decoded.isdigit():
-                continue
-            mic = int(decoded)
+            else:
+                try:
+                    raw = ser.readline()
+                except (_serial_mod.SerialException, OSError):
+                    ser = reconnect_serial(serial_port, BAUD_RATE)
+                    if ser is None:
+                        break
+                    rolling_noise.clear()
+                    continue
+                if not raw:
+                    continue
+                decoded = raw.decode(errors="ignore").strip()
+                if not decoded.isdigit():
+                    continue
+                mic = int(decoded)
 
             rolling_noise.append(mic)
 
@@ -318,27 +415,74 @@ def main() -> None:
             if verbose:
                 print(f"[verbose] mic={mic:4d}  baseline={dynamic_baseline:.1f}", end="\r")
 
-            # ── FFT CLAP DETECTION ────────────────────────────────────────────
-            clap_detected = False
+            # ── DERIVATIVE SPIKE DETECTOR ─────────────────────────────────────
+            # Per-sample transient onset detector. A spike fires when the
+            # smoothed first-derivative exceeds baseline * SPIKE_THRESHOLD_MULT.
+            # A second spike while already recording = probable simultaneous event.
+            fft_detected_label: str | None = None
+            sample_index += 1
+            deriv_buf.append(mic)
+
+            if len(deriv_buf) == deriv_buf.maxlen:
+                diffs = [abs(deriv_buf[i+1] - deriv_buf[i])
+                         for i in range(len(deriv_buf) - 1)]
+                smooth_deriv = sum(diffs) / len(diffs)
+                spike_threshold = dynamic_baseline * SPIKE_THRESHOLD_MULT
+
+                if (smooth_deriv > spike_threshold
+                        and time.time() - last_spike_time > SPIKE_COOLDOWN
+                        and sample_index - last_spike_sample > SPIKE_MIN_GAP):
+                    spike_count += 1
+                    last_spike_time   = time.time()
+                    last_spike_sample = sample_index
+                    if verbose:
+                        print(f"\n[verbose] SPIKE #{spike_count}  "
+                              f"deriv={smooth_deriv:.1f}  "
+                              f"threshold={spike_threshold:.1f}")
+                    if recording and spike_count >= 2:
+                        print(f"⚡ Simultaneous event detected "
+                              f"(spike #{spike_count} mid-recording — "
+                              "two sounds may be overlapping)")
+
+            if not recording:
+                spike_count = 0
+
+            # ── FFT SOUND DETECTION (overlapping windows) ─────────────────────
+            # Each window advances by FFT_STRIDE samples (< CLAP_WINDOW),
+            # giving CLAP_WINDOW/FFT_STRIDE-fold overlap so sounds at window
+            # boundaries still receive a full-window classification.
             fft_buffer.append(mic)
             fft_sample_count += 1
 
-            if fft_sample_count >= CLAP_WINDOW and len(fft_buffer) == CLAP_WINDOW:
+            if fft_sample_count >= FFT_STRIDE and len(fft_buffer) == CLAP_WINDOW:
                 fft_sample_count = 0
                 fft_feat = np.abs(np.fft.rfft(np.array(fft_buffer)))
                 fft_feat = np.array(
                     [np.mean(fft_feat[i::FEATURE_COUNT]) for i in range(FEATURE_COUNT)]
                 ).reshape(1, -1)
-                pred = clap_model.predict(fft_feat)[0]
+                fft_pred_idx = int(sound_model.predict(fft_feat)[0])
+                fft_probs    = sound_model.predict_proba(fft_feat)[0]
+                fft_conf     = float(fft_probs[fft_pred_idx])
+                fft_label    = (fft_label_names[fft_pred_idx]
+                                if fft_pred_idx < len(fft_label_names) else 'unknown')
 
                 if verbose:
-                    print(f"\n[verbose] FFT window pred={pred}")
+                    prob_str = '  '.join(
+                        f'{fft_label_names[i] if i < len(fft_label_names) else i}='
+                        f'{fft_probs[i]:.0%}'
+                        for i in range(len(fft_probs))
+                    )
+                    print(f"\n[verbose] FFT: {fft_label} ({fft_conf:.0%})  {prob_str}")
 
-                if pred == 1 and time.time() - last_clap > COOLDOWN:
-                    print("👏 CLAP detected")
+                # Trigger LED for any non-noise sound above confidence threshold
+                is_noise = fft_label in ('noise', 'background', 'silence')
+                if (not is_noise
+                        and fft_conf >= confidence_threshold
+                        and time.time() - last_clap > COOLDOWN):
+                    print(f"🔊 FFT detected: {fft_label} ({fft_conf:.0%})")
                     send(ser, b"1")
                     last_clap = time.time()
-                    clap_detected = True
+                    fft_detected_label = fft_label
 
             # ── SOUND RECORDING ───────────────────────────────────────────────
             if not recording and mic > dynamic_baseline * TRIGGER_MULT:
@@ -389,7 +533,9 @@ def main() -> None:
                     else:
                         cnn_label = reverse.get(pred_idx_smooth, "unknown")
 
-                    final_label = "clap" if clap_detected else cnn_label
+                    # FFT label takes precedence if it fired on this window;
+                    # otherwise use CNN label
+                    final_label = fft_detected_label if fft_detected_label else cnn_label
 
                     peak = float(max(current_sound))
                     energy = float(sum(abs(v - baseline_noise) for v in current_sound))
@@ -399,14 +545,28 @@ def main() -> None:
                     print(f"Detected: {final_label}  "
                           f"(confidence={confidence:.0%}, peak={peak:.0f}, dur={duration:.2f}s)")
 
-                    log_detection(LOG_CSV, final_label, peak, duration, energy, sharpness)
+                    log_detection(LOG_CSV, final_label, peak, duration, energy, sharpness,
+                                  num_samples=len(current_sound), baseline=dynamic_baseline)
                     session_counts[final_label] = session_counts.get(final_label, 0) + 1
 
                     wav_path = None
-                    if SAVE_WAV:
+                    if SAVE_WAV and not wav_saving_disabled:
                         wav_path = save_wav(waveform, final_label)
                         if wav_path and verbose:
                             print(f"[verbose] Saved wav: {wav_path}")
+                        elif wav_path is None:
+                            # save_wav() failed — check if disk is full
+                            import shutil
+                            free = shutil.disk_usage(SOUNDS_DB_DIR).free
+                            if free < 10 * 1024 * 1024:  # < 10 MB
+                                wav_saving_disabled = True
+                                print("\n❌ Disk full — wav saving disabled for this session.")
+                                print("   Free up space and restart to re-enable.")
+
+                    # ── Confidence floor warning ──────────────────────────────
+                    if confidence < 0.4 and not fft_detected_label:
+                        print(f"   ⚠️  Very low confidence ({confidence:.0%}) — "
+                              "labelling this sound may hurt model accuracy.")
 
                     # ── Submit to label worker (non-blocking) ─────────────────
                     worker.submit(SoundResult(
@@ -459,6 +619,11 @@ def main() -> None:
         print("Waiting for label worker to finish...")
         worker.stop()
         shutdown(cnn_model, label_map, ser, session_counts)
+        if args.export_tflite and label_map:
+            try:
+                export_tflite(cnn_model, args.export_tflite)
+            except Exception as e:
+                print(f"Warning: TFLite export failed: {e}")
 
 
 if __name__ == "__main__":

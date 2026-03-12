@@ -31,8 +31,16 @@ SPEC_W = 64             # Mel spectrogram width  (time frames)
 
 # ── FFT features ──────────────────────────────────────────────────────────────
 NUM_FEATURES  = 13      # Features for listener.py TFLite model
-FEATURE_COUNT = 16      # Features for clap_model.pkl (ai_classifier.py / trainer.py)
-CLAP_WINDOW   = 64      # Samples per FFT clap-detection window
+FEATURE_COUNT        = 16   # FFT frequency bins (must match training)
+CLAP_WINDOW          = 64   # Samples per FFT classification window
+FFT_STRIDE           = 8    # Samples to advance between windows (overlapping)
+                            # CLAP_WINDOW/FFT_STRIDE = 8x overlap → 80ms resolution
+
+# Derivative-based spike detector — runs per-sample in parallel with FFT
+DERIVATIVE_WINDOW    = 4    # Samples for smoothed first-derivative
+SPIKE_THRESHOLD_MULT = 8.0  # Spike if derivative > baseline * this value
+SPIKE_COOLDOWN       = 0.3  # Min seconds between separate spike events
+SPIKE_MIN_GAP        = 5    # Min samples between two spikes to be counted separately
 
 # ── Detection thresholds ──────────────────────────────────────────────────────
 COOLDOWN     = 1.0      # Minimum seconds between clap detections
@@ -46,7 +54,9 @@ SILENCE_MULT        = 1.2  # ai_classifier.py: mic must drop below baseline * th
 MIN_SOUND_SAMPLES = 8      # Minimum samples before a recording is considered valid
 MAX_SOUND_SAMPLES = 4000   # Maximum samples before force-stop (~40 s @ ARDUINO_SAMPLE_RATE)
 
-CNN_CONFIDENCE_THRESHOLD  = 0.6  # CNN predictions below this are labelled "uncertain"
+CNN_CONFIDENCE_THRESHOLD    = 0.6  # CNN predictions below this are labelled "uncertain"
+MIN_TRAINING_CONFIDENCE     = 0.4  # ai_classifier: warn if training on a sound the CNN
+                                   #   was less than this confident about
 CLAP_CONFIDENCE_THRESHOLD = 0.7  # listener.py: TFLite clap probability must exceed this
 CLAP_CONFIDENCE_BORDER_LOW  = 0.4  # trainer.py: borderline confidence warning range (low)
 CLAP_CONFIDENCE_BORDER_HIGH = 0.6  # trainer.py: borderline confidence warning range (high)
@@ -56,18 +66,22 @@ ROLLING_NOISE_LEN    = 200  # Deque length for dynamic baseline
 BASELINE_UPDATE_EVERY = 10  # Recalculate dynamic baseline every N samples
 
 # ── Model / data files ────────────────────────────────────────────────────────
-CLAP_MODEL_PATH     = "clap_model.pkl"       # Logistic regression clap detector
+CLAP_MODEL_PATH     = "clap_model.pkl"       # kept for backward compat
+SOUND_MODEL_PATH    = "sound_model.pkl"      # Multi-class logistic regression detector
 LISTENER_MODEL_PATH = "sound_model.tflite"  # TFLite model used by listener.py
 CNN_MODEL_FILE  = "cnn_sound_model.h5"   # CNN spectrogram classifier
 LABEL_MAP_FILE  = "label_map.json"       # Class name ↔ index mapping
 
-SOUNDS_DB_DIR   = "sounds_db"            # Directory for all wav files and CSVs
+SOUNDS_DB_DIR      = "sounds_db"         # Directory for all wav files and CSVs
+TRAINING_DATA_DIR  = SOUNDS_DB_DIR       # trainer.py looks here for label_*.csv files
 
+# CSV naming convention: label_<name>.csv  e.g. label_clap.csv, label_knock.csv
+# recording.py --label <name> creates these automatically.
 # All CSV outputs go inside SOUNDS_DB_DIR
 LOG_CSV         = f"{SOUNDS_DB_DIR}/detections.csv"   # ai_classifier.py detection log
 RAW_CSV         = f"{SOUNDS_DB_DIR}/sounds_raw.csv"   # recording.py raw mic data
-CLAP_CSV        = f"{SOUNDS_DB_DIR}/sound_data_label1.csv"  # trainer.py clap examples
-NOISE_CSV       = f"{SOUNDS_DB_DIR}/sound_data_label0.csv"  # trainer.py noise examples
+CLAP_CSV        = f"{SOUNDS_DB_DIR}/label_clap.csv"   # clap training examples
+NOISE_CSV       = f"{SOUNDS_DB_DIR}/label_noise.csv"  # noise/background examples
 
 SAVE_WAV        = True                   # Set False to skip wav saving in ai_classifier.py
 
