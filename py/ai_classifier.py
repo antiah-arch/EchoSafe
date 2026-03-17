@@ -21,7 +21,7 @@ Adam = tf.keras.optimizers.Adam
 from collections import deque
 
 from config import (
-    COM_PORT, BAUD_RATE,
+    COM_PORT, BAUD_RATE, ARDUINO_SAMPLE_RATE, ARDUINO_SAMPLE_INTERVAL,
     MIN_TRAINING_CONFIDENCE,
     SPEC_H, SPEC_W,
     COOLDOWN, CLAP_WINDOW, FFT_STRIDE, FEATURE_COUNT,
@@ -33,8 +33,14 @@ from config import (
     CLAP_MODEL_PATH, SOUND_MODEL_PATH, CNN_MODEL_FILE, LABEL_MAP_FILE,
     SOUNDS_DB_DIR, LOG_CSV, SAVE_WAV,
     HISTORY_LEN, TRAIN_EPOCHS, AUTOSAVE_INTERVAL,
-    ARDUINO_SAMPLE_RATE, ARDUINO_SAMPLE_INTERVAL, PC_SAMPLE_RATE,
+    FREQ_BAND_LOW_HZ, FREQ_BAND_MID_HZ, FREQ_BAND_HIGH_HZ,
+    ALARM_TONES, ALARM_FREQ_TOLERANCE_HZ, ALARM_ENERGY_FRACTION,
+    PATTERN_WINDOW_SEC, PATTERN_MIN_PULSES, PATTERN_MAX_PULSE_SEC,
+    PATTERN_MIN_GAP_SEC, PATTERN_REPEAT_THRESH,
 )
+
+# PC sample rate for librosa processing (match Arduino sample rate)
+PC_SAMPLE_RATE = ARDUINO_SAMPLE_RATE
 
 from serial_helper import open_serial, close_serial, reconnect_serial, send, auto_detect_port
 from model_versioning import versioned_save
@@ -273,6 +279,130 @@ def export_tflite(keras_model: tf.keras.Model, out_path: str) -> None:
     print(f"✅ TFLite model saved: {out_path} ({size_kb:.1f} KB)")
 
 
+def _hz_to_bin(hz: float, sample_rate: int, window: int) -> int:
+    """Convert a frequency in Hz to an FFT bin index."""
+    return int(round(hz * window / sample_rate))
+
+
+def freq_band_ratios(fft_mag: np.ndarray, sample_rate: int, window: int) -> np.ndarray:
+    """
+    Return [low_ratio, mid_ratio, high_ratio] — the fraction of total FFT energy
+    in each configured frequency band.  These ratios are distance-invariant:
+    a smoke alarm at 5m through a wall has the same spectral shape as at 1m,
+    just quieter.  The ratio of energy at 3150 Hz relative to total energy
+    stays approximately constant.
+
+    Args:
+        fft_mag  : absolute FFT magnitudes from np.fft.rfft (length window//2 + 1)
+        sample_rate: samples per second (ARDUINO_SAMPLE_RATE)
+        window   : FFT window size (CLAP_WINDOW)
+    Returns:
+        np.ndarray of shape (3,) — [low, mid, high] energy fractions, sum ≤ 1.0
+    """
+    energy = fft_mag ** 2
+    total  = energy.sum() + 1e-9   # avoid division by zero
+
+    def band_energy(lo_hz: float, hi_hz: float) -> float:
+        lo = _hz_to_bin(lo_hz, sample_rate, window)
+        hi = _hz_to_bin(hi_hz, sample_rate, window)
+        return float(energy[lo:hi].sum())
+
+    low  = band_energy(*FREQ_BAND_LOW_HZ)
+    mid  = band_energy(*FREQ_BAND_MID_HZ)
+    high = band_energy(*FREQ_BAND_HIGH_HZ)
+    return np.array([low / total, mid / total, high / total], dtype=np.float32)
+
+
+def check_alarm_tones(fft_mag: np.ndarray, sample_rate: int, window: int) -> list[str]:
+    """
+    Rule-based alarm tone detector.  For each entry in ALARM_TONES, check whether
+    the fraction of total spectral energy within ±ALARM_FREQ_TOLERANCE_HZ of that
+    frequency exceeds ALARM_ENERGY_FRACTION.
+
+    Returns a list of matched alarm names (empty list = no alarm tone detected).
+    This fires independently of the trained classifier — it works purely on physics
+    and is immune to distance/volume because it uses energy fractions, not absolute levels.
+    """
+    energy = fft_mag ** 2
+    total  = energy.sum() + 1e-9
+
+    matched: list[str] = []
+    for name, centre_hz in ALARM_TONES.items():
+        lo = _hz_to_bin(max(0, centre_hz - ALARM_FREQ_TOLERANCE_HZ), sample_rate, window)
+        hi = _hz_to_bin(centre_hz + ALARM_FREQ_TOLERANCE_HZ, sample_rate, window)
+        hi = min(hi, len(energy))
+        band_frac = float(energy[lo:hi].sum()) / total
+        if band_frac >= ALARM_ENERGY_FRACTION:
+            matched.append(name)
+    return matched
+
+
+class AlarmPatternDetector:
+    """
+    Tracks the timing of consecutive sound events to detect repeating alarm patterns.
+
+    A smoke alarm T3 pattern is: 3 beeps of ~0.5s each with short gaps, then ~1.5s
+    silence, then repeat.  This detector doesn't know about frequencies — it just
+    watches for short pulses (< PATTERN_MAX_PULSE_SEC) separated by short gaps
+    (> PATTERN_MIN_GAP_SEC) that repeat within PATTERN_WINDOW_SEC.
+
+    This is a second independent detection path.  If BOTH the tone matcher AND
+    the pattern detector agree, confidence is very high regardless of distance.
+    """
+
+    def __init__(self) -> None:
+        # List of (start_time, end_time) for each recent detected sound event
+        self._pulses: list[tuple[float, float]] = []
+
+    def record_event(self, start_time: float, end_time: float) -> None:
+        """Call this every time a sound event finishes."""
+        now = end_time
+        # Prune pulses older than the detection window
+        self._pulses = [
+            (s, e) for s, e in self._pulses
+            if now - s <= PATTERN_WINDOW_SEC
+        ]
+        self._pulses.append((start_time, end_time))
+
+    def detect(self) -> str | None:
+        """
+        Analyse recent pulses.  Returns an alarm name if a pattern is confirmed,
+        or None if no pattern detected.
+
+        Currently distinguishes:
+            "smoke_alarm_pattern"  — 3 pulses matching T3 timing
+            "co_alarm_pattern"     — 4 pulses matching CO timing
+            "repeating_alarm"      — any repeating short-pulse pattern
+        """
+        if len(self._pulses) < PATTERN_MIN_PULSES:
+            return None
+
+        # Filter to only short pulses (alarm beeps are brief)
+        short = [
+            (s, e) for s, e in self._pulses
+            if (e - s) <= PATTERN_MAX_PULSE_SEC
+        ]
+        if len(short) < PATTERN_MIN_PULSES:
+            return None
+
+        # Check gaps between consecutive short pulses
+        valid_pairs = 0
+        for i in range(1, len(short)):
+            gap = short[i][0] - short[i - 1][1]   # silence between end and next start
+            if gap >= PATTERN_MIN_GAP_SEC:
+                valid_pairs += 1
+
+        if valid_pairs < PATTERN_REPEAT_THRESH:
+            return None
+
+        # Classify by pulse count within the window
+        if len(short) >= 4:
+            return "co_alarm_pattern"
+        if len(short) == 3:
+            return "smoke_alarm_pattern"
+        return "repeating_alarm"
+
+
 def shutdown(cnn_model, label_map: dict, ser, session_counts: dict) -> None:
     print("\n\n── Shutting down ──────────────────────────────")
     try:
@@ -343,10 +473,13 @@ def main() -> None:
         raw = ser.readline()
         if raw:
             decoded = raw.decode(errors="ignore").strip()
-            if decoded.isdigit():
-                val = int(decoded)
-                cal.append(val)
-                rolling_noise.append(val)
+            # Handle both "512" (old 100Hz sketch) and "512,489" (new 8kHz sketch)
+            for part in decoded.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    val = int(part)
+                    cal.append(val)
+                    rolling_noise.append(val)
 
     if not cal:
         print("Error: calibration received no data. Check Arduino connection.")
@@ -371,12 +504,15 @@ def main() -> None:
     pred_history: deque = deque(maxlen=HISTORY_LEN)
     current_sound: list[int] = []
     recording = False
+    sound_start_time: float = 0.0   # wall-clock time when current sound event started
     last_save = time.time()
     last_clap = time.time()
     dynamic_baseline = baseline_noise
     baseline_update_counter = 0
     fft_sample_count     = 0       # counts samples since last FFT window was run
     session_counts: dict[str, int] = {}
+    alarm_pattern = AlarmPatternDetector()   # tracks pulse timing across events
+    serial_queue: deque = deque()            # unpacked samples from paired serial lines
 
     print("🎧 Listening...  (Ctrl+C to stop)\n")
 
@@ -390,20 +526,30 @@ def main() -> None:
                     print("\n🔁 Simulation complete.")
                     break
             else:
-                try:
-                    raw = ser.readline()
-                except (_serial_mod.SerialException, OSError):
-                    ser = reconnect_serial(serial_port, BAUD_RATE)
-                    if ser is None:
-                        break
-                    rolling_noise.clear()
+                # Drain the unpacked-sample queue first before calling readline()
+                # The Arduino sends "A,B\n" pairs (two samples per line at 8kHz).
+                # We unpack into serial_queue so the rest of the loop still sees
+                # one integer per iteration — no other logic needs to change.
+                if not serial_queue:
+                    try:
+                        raw = ser.readline()
+                    except (_serial_mod.SerialException, OSError):
+                        ser = reconnect_serial(serial_port, BAUD_RATE)
+                        if ser is None:
+                            break
+                        rolling_noise.clear()
+                        continue
+                    if not raw:
+                        continue
+                    decoded = raw.decode(errors="ignore").strip()
+                    # Handle both "512" (legacy 100Hz) and "512,489" (8kHz paired)
+                    for part in decoded.split(","):
+                        part = part.strip()
+                        if part.isdigit():
+                            serial_queue.append(int(part))
+                if not serial_queue:
                     continue
-                if not raw:
-                    continue
-                decoded = raw.decode(errors="ignore").strip()
-                if not decoded.isdigit():
-                    continue
-                mic = int(decoded)
+                mic = serial_queue.popleft()
 
             rolling_noise.append(mic)
 
@@ -456,15 +602,37 @@ def main() -> None:
 
             if fft_sample_count >= FFT_STRIDE and len(fft_buffer) == CLAP_WINDOW:
                 fft_sample_count = 0
-                fft_feat = np.abs(np.fft.rfft(np.array(fft_buffer)))
+                fft_raw   = np.abs(np.fft.rfft(np.array(fft_buffer)))
+
+                # ── Frequency band ratios (distance-invariant features) ────────
+                # These are appended to the existing binned features so the
+                # classifier can learn spectral shape independent of volume.
+                bands = freq_band_ratios(fft_raw, ARDUINO_SAMPLE_RATE, CLAP_WINDOW)
+
                 fft_feat = np.array(
-                    [np.mean(fft_feat[i::FEATURE_COUNT]) for i in range(FEATURE_COUNT)]
-                ).reshape(1, -1)
+                    [np.mean(fft_raw[i::FEATURE_COUNT]) for i in range(FEATURE_COUNT)]
+                )
+                # Normalise by total energy so magnitude doesn't dominate
+                fft_feat = fft_feat / (fft_feat.sum() + 1e-9)
+                # Append band ratios — trainer.py must include these when training
+                fft_feat = np.concatenate([fft_feat, bands]).reshape(1, -1)
+
                 fft_pred_idx = int(sound_model.predict(fft_feat)[0])
                 fft_probs    = sound_model.predict_proba(fft_feat)[0]
                 fft_conf     = float(fft_probs[fft_pred_idx])
                 fft_label    = (fft_label_names[fft_pred_idx]
                                 if fft_pred_idx < len(fft_label_names) else 'unknown')
+
+                # ── Rule-based alarm tone check (runs parallel to classifier) ──
+                # Works on raw (un-normalised) FFT magnitudes and checks energy
+                # fractions, so it fires regardless of how quiet the alarm is.
+                alarm_matches = check_alarm_tones(fft_raw, ARDUINO_SAMPLE_RATE, CLAP_WINDOW)
+                if alarm_matches:
+                    tone_str = ", ".join(alarm_matches)
+                    print(f"🚨 Alarm tone detected: {tone_str}")
+                    send(ser, b"1")
+                    last_clap = time.time()
+                    fft_detected_label = alarm_matches[0]   # use first match as label
 
                 if verbose:
                     prob_str = '  '.join(
@@ -472,7 +640,8 @@ def main() -> None:
                         f'{fft_probs[i]:.0%}'
                         for i in range(len(fft_probs))
                     )
-                    print(f"\n[verbose] FFT: {fft_label} ({fft_conf:.0%})  {prob_str}")
+                    band_str = f"low={bands[0]:.2f} mid={bands[1]:.2f} high={bands[2]:.2f}"
+                    print(f"\n[verbose] FFT: {fft_label} ({fft_conf:.0%})  {prob_str}  bands: {band_str}")
 
                 # Trigger LED for any non-noise sound above confidence threshold
                 is_noise = fft_label in ('noise', 'background', 'silence')
@@ -487,6 +656,7 @@ def main() -> None:
             # ── SOUND RECORDING ───────────────────────────────────────────────
             if not recording and mic > dynamic_baseline * TRIGGER_MULT:
                 recording = True
+                sound_start_time = time.time()
                 current_sound = [mic]
                 if verbose:
                     print(f"\n[verbose] Recording started  "
@@ -536,6 +706,22 @@ def main() -> None:
                     # FFT label takes precedence if it fired on this window;
                     # otherwise use CNN label
                     final_label = fft_detected_label if fft_detected_label else cnn_label
+
+                    sound_end_time = time.time()
+
+                    # ── Alarm pattern detection ───────────────────────────────
+                    # Record this event's timing and check for repeating patterns
+                    # (e.g. smoke alarm T3: 3 short beeps + silence + repeat).
+                    # This is independent of frequency — it detects rhythm alone.
+                    alarm_pattern.record_event(sound_start_time, sound_end_time)
+                    pattern_hit = alarm_pattern.detect()
+                    if pattern_hit:
+                        print(f"🚨 ALARM PATTERN: {pattern_hit}  "
+                              f"(repeating short-pulse rhythm detected)")
+                        send(ser, b"1")
+                        # Elevate label if pattern overrides uncertain classification
+                        if final_label.startswith("uncertain") or final_label == "unknown":
+                            final_label = pattern_hit
 
                     peak = float(max(current_sound))
                     energy = float(sum(abs(v - baseline_noise) for v in current_sound))

@@ -85,17 +85,42 @@ def parse_args() -> argparse.Namespace:
 
 def _read_int(ser: serial.Serial) -> int | None:
     """
-    Read one line from serial and return it as an int, or None if invalid.
-    FIX 1 & 12: always decode + strip before isdigit() and int() conversion
-    so bytes like b'512\\r\\n' are handled correctly on all platforms.
+    Read one line from serial and return the first valid integer, or None.
+
+    Handles both serial formats:
+      - Legacy 100 Hz sketch : "512\\n"       (one sample per line)
+      - New 8 kHz sketch     : "512,489\\n"   (two samples per line — returns first)
+
+    For the 8 kHz format the second sample is discarded here; the caller in
+    the recording loop calls _read_ints() to get both values without loss.
     """
     raw = ser.readline()
     if not raw:
         return None
     decoded = raw.decode(errors="ignore").strip()
-    if not decoded.isdigit():
+    # Take the first comma-separated token
+    first = decoded.split(",")[0].strip()
+    if not first.isdigit():
         return None
-    return int(decoded)
+    return int(first)
+
+
+def _read_ints(ser: serial.Serial) -> list[int]:
+    """
+    Read one line from serial and return all valid integers on that line.
+    Returns [] if the line is empty or contains no digits.
+    Used by the recording loop so neither sample in a paired line is lost.
+    """
+    raw = ser.readline()
+    if not raw:
+        return []
+    decoded = raw.decode(errors="ignore").strip()
+    result = []
+    for part in decoded.split(","):
+        part = part.strip()
+        if part.isdigit():
+            result.append(int(part))
+    return result
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -194,7 +219,7 @@ def record(
 
                 # FIX 4: catch SerialException and attempt reconnection
                 try:
-                    mic = _read_int(ser)
+                    mics = _read_ints(ser)  # returns [A] or [A, B] for paired format
                 except (serial.SerialException, OSError):
                     ser = reconnect_serial(port, baud)
                     if ser is None:
@@ -208,62 +233,63 @@ def record(
                     print(f"\nRecording complete ({duration_seconds}s).")
                     break
 
-                if mic is None:
+                if not mics:
                     continue
 
-                # Non-blocking LED off
-                if last_led and time() - last_led >= LED_ON_TIME:
-                    send(ser, b"0")
-                    last_led = 0.0
+                for mic in mics:
+                    # Non-blocking LED off
+                    if last_led and time() - last_led >= LED_ON_TIME:
+                        send(ser, b"0")
+                        last_led = 0.0
 
-                window.append(mic)
+                    window.append(mic)
 
-                if len(window) < WINDOW_SIZE:
-                    continue
+                    if len(window) < WINDOW_SIZE:
+                        continue
 
-                peak      = max(window)
-                # FIX 7: mean energy (normalised by window size) so values
-                # stay comparable if WINDOW_SIZE changes in config
-                energy    = sum(abs(v - baseline_noise) for v in window) / len(window)
-                sharpness = peak / (baseline_noise + 1)
-                now       = time() - start_time
-                above     = peak > clap_threshold
+                    peak      = max(window)
+                    # FIX 7: mean energy (normalised by window size) so values
+                    # stay comparable if WINDOW_SIZE changes in config
+                    energy    = sum(abs(v - baseline_noise) for v in window) / len(window)
+                    sharpness = peak / (baseline_noise + 1)
+                    now       = time() - start_time
+                    above     = peak > clap_threshold
 
-                # FIX 3: track sound duration using rising/falling edge,
-                # not just "peak above threshold for < 0.25s"
-                if above and not prev_above:
-                    sound_start = time()           # rising edge
-                if above and sound_start is not None:
-                    duration = time() - sound_start
-                elif not above and sound_start is not None:
-                    duration = time() - sound_start  # capture at falling edge
-                    sound_start = None
-                else:
-                    duration = 0.0
+                    # FIX 3: track sound duration using rising/falling edge,
+                    # not just "peak above threshold for < 0.25s"
+                    if above and not prev_above:
+                        sound_start = time()           # rising edge
+                    if above and sound_start is not None:
+                        duration = time() - sound_start
+                    elif not above and sound_start is not None:
+                        duration = time() - sound_start  # capture at falling edge
+                        sound_start = None
+                    else:
+                        duration = 0.0
 
-                prev_above = above
+                    prev_above = above
 
-                # Use the session label if given; otherwise try to infer from signal
-                row_label = label if label else "unknown"
-                # Still detect and flag claps for reference even in labelled sessions
-                if not above and duration > 0.0 and duration < CLAP_DURATION_MAX:
-                    success(f"CLAP 👏 peak={peak} dur={duration:.3f}s")
-                    if not last_led:
-                        send(ser, b"1")
-                        last_led = time()
-                elif verbose:
-                    print(f"  peak={peak:.0f}  dur={duration:.3f}s  "
-                          f"energy={energy:.1f}  label={row_label}", end="\r")
+                    # Use the session label if given; otherwise try to infer from signal
+                    row_label = label if label else "unknown"
+                    # Still detect and flag claps for reference even in labelled sessions
+                    if not above and duration > 0.0 and duration < CLAP_DURATION_MAX:
+                        success(f"CLAP 👏 peak={peak} dur={duration:.3f}s")
+                        if not last_led:
+                            send(ser, b"1")
+                            last_led = time()
+                    elif verbose:
+                        print(f"  peak={peak:.0f}  dur={duration:.3f}s  "
+                              f"energy={energy:.1f}  label={row_label}", end="\r")
 
-                writer.writerow([
-                    round(now, 3),
-                    peak,
-                    round(duration, 4),
-                    round(energy, 4),
-                    round(sharpness, 4),
-                    row_label,
-                ])
-                f.flush()
+                    writer.writerow([
+                        round(now, 3),
+                        peak,
+                        round(duration, 4),
+                        round(energy, 4),
+                        round(sharpness, 4),
+                        row_label,
+                    ])
+                    f.flush()
 
     except KeyboardInterrupt:
         print("\nRecording stopped.")

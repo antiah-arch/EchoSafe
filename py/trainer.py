@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import glob
 import os
 import sys
 from collections import deque          # FIX 1: deque for bounded buffer
@@ -25,7 +26,7 @@ import numpy as np
 import pandas as pd
 from numpy.fft import rfft
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 
 from source import DataEntry
@@ -33,11 +34,15 @@ from config import (
     FEATURE_COUNT,
     CLI_WINDOW_SIZE as WINDOW_SIZE,
     CLAP_MODEL_PATH,
+    SOUND_MODEL_PATH,
     CLAP_CONFIDENCE_BORDER_LOW,
     CLAP_CONFIDENCE_BORDER_HIGH,
     SOUNDS_DB_DIR,
-    CLAP_CSV,    # FIX 5 / CSV redirect: paths now point inside sounds_db/
+    TRAINING_DATA_DIR,
+    CLAP_CSV,
     NOISE_CSV,
+    ARDUINO_SAMPLE_RATE,
+    FREQ_BAND_LOW_HZ, FREQ_BAND_MID_HZ, FREQ_BAND_HIGH_HZ,
 )
 
 # FIX 9: initialize_model moved to where TFLite loading actually belongs.
@@ -64,15 +69,55 @@ def initialize_model(model_path: str):
 
 # ── Feature extraction ─────────────────────────────────────────────────────────
 
-def extract_features(signal: np.ndarray, feature_count: int | None = None) -> np.ndarray:
-    # FIX 4: don't capture FEATURE_COUNT as a default arg at definition time —
-    # read it directly so runtime config changes are always respected
-    fc = feature_count if feature_count is not None else FEATURE_COUNT
-    fft_vals = np.abs(rfft(signal))
-    return np.array(
-        [np.mean(fft_vals[i::fc]) for i in range(fc)],
-        dtype=np.float32,
-    )
+def _hz_to_bin(hz: float, sample_rate: int, window: int) -> int:
+    """Convert a frequency in Hz to an FFT bin index."""
+    return int(round(hz * window / sample_rate))
+
+
+def extract_features(signal: np.ndarray, feature_count: int | None = None,
+                     window: int | None = None) -> np.ndarray:
+    """
+    Extract the feature vector used for both training and inference.
+
+    Features (in order):
+        1. FEATURE_COUNT normalised FFT bin averages  — spectral shape
+        2. 3 frequency band energy ratios             — distance-invariant alarm cues
+           (low 0–500 Hz, mid 500–1500 Hz, high 1500–4000 Hz)
+
+    Normalisation: the FFT bins are divided by their total so the vector
+    represents spectral *shape* rather than *loudness*.  The band ratios are
+    fractions of total energy and are therefore also volume-invariant.
+
+    This means a smoke alarm at 5 metres through a wall produces nearly the
+    same feature vector as one at 1 metre — only the amplitude changes, not
+    the shape.  The classifier learns shape, so it fires correctly at distance.
+    """
+    fc  = feature_count if feature_count is not None else FEATURE_COUNT
+    win = window if window is not None else WINDOW_SIZE
+    sr  = ARDUINO_SAMPLE_RATE
+
+    fft_raw = np.abs(rfft(signal))
+
+    # Binned averages, normalised by sum
+    bins = np.array([np.mean(fft_raw[i::fc]) for i in range(fc)], dtype=np.float32)
+    bins = bins / (bins.sum() + 1e-9)
+
+    # Frequency band energy ratios
+    energy = fft_raw ** 2
+    total  = energy.sum() + 1e-9
+
+    def band(lo_hz: float, hi_hz: float) -> float:
+        lo = _hz_to_bin(lo_hz, sr, win)
+        hi = _hz_to_bin(hi_hz, sr, win)
+        return float(energy[lo:hi].sum() / total)
+
+    bands = np.array([
+        band(*FREQ_BAND_LOW_HZ),
+        band(*FREQ_BAND_MID_HZ),
+        band(*FREQ_BAND_HIGH_HZ),
+    ], dtype=np.float32)
+
+    return np.concatenate([bins, bands])
 
 
 # ── Online training (called from main.py CLI pipeline) ────────────────────────
@@ -144,45 +189,78 @@ def _write(output, msg: str) -> None:
 
 # ── Standalone CSV training ────────────────────────────────────────────────────
 
+def scan_training_dir(training_dir: str) -> dict[str, str]:
+    """
+    Scan a directory for label_*.csv files and return a dict of
+    {label_name: csv_path}.
+
+    Convention: label_clap.csv → label 'clap'
+                label_knock.csv → label 'knock'
+                label_noise.csv → label 'noise'
+
+    Also accepts the legacy sound_data_label0.csv / sound_data_label1.csv
+    filenames for backward compatibility.
+    """
+    found: dict[str, str] = {}
+
+    # New convention: label_<name>.csv
+    for path in sorted(glob.glob(os.path.join(training_dir, 'label_*.csv'))):
+        name = os.path.basename(path)[len('label_'):-len('.csv')]
+        found[name] = path
+
+    # Legacy: sound_data_label0.csv (noise) / sound_data_label1.csv (clap)
+    legacy = {
+        'noise': os.path.join(training_dir, 'sound_data_label0.csv'),
+        'clap':  os.path.join(training_dir, 'sound_data_label1.csv'),
+    }
+    for name, path in legacy.items():
+        if os.path.exists(path) and name not in found:
+            found[name] = path
+
+    return found
+
+
 def _train_from_csvs(
-    clap_csv: str = CLAP_CSV,       # FIX 5: default paths now in sounds_db/
-    noise_csv: str = NOISE_CSV,
-    model_out: str = CLAP_MODEL_PATH,
+    training_dir: str = TRAINING_DATA_DIR,
+    model_out: str = SOUND_MODEL_PATH,
     window_size: int = WINDOW_SIZE,
     feature_count: int = FEATURE_COUNT,
     verbose: bool = False,
+    dry_run: bool = False,
+    export_tflite_path: str | None = None,
 ) -> None:
     # Ensure output directory exists
-    os.makedirs(SOUNDS_DB_DIR, exist_ok=True)
+    os.makedirs(training_dir, exist_ok=True)
 
-    for path in (clap_csv, noise_csv):
-        if not os.path.exists(path):
-            print(f"Error: training data file not found: {path!r}")
-            print(f"Expected files in {SOUNDS_DB_DIR}/")
-            print("Run recording.py or dataset_downloader.py first.")
-            sys.exit(1)
+    label_csvs = scan_training_dir(training_dir)
+    if not label_csvs:
+        print(f"Error: no label_*.csv files found in {training_dir!r}")
+        print("Run: python recording.py --label <name> --duration 60")
+        sys.exit(1)
 
-    # FIX 8: load and process each CSV separately to halve peak memory usage
-    print(f"Loading {clap_csv}...")
-    clap_df  = pd.read_csv(clap_csv)
-    print(f"Loading {noise_csv}...")
-    noise_df = pd.read_csv(noise_csv)
+    # Build label → integer index map (sorted for reproducibility)
+    label_names = sorted(label_csvs.keys())
+    label_index = {name: i for i, name in enumerate(label_names)}
+    print(f"Found {len(label_names)} class(es): {label_names}")
 
     X: list[np.ndarray] = []
     y: list[int] = []
 
-    for label, df in ((1, clap_df), (0, noise_df)):
+    for name in label_names:
+        path = label_csvs[name]
+        print(f"Loading {path}...")
+        df = pd.read_csv(path)
         if "mic_value" not in df.columns:
-            print(f"Error: CSV missing 'mic_value' column: {clap_csv if label == 1 else noise_csv}")
+            print(f"Error: CSV missing 'mic_value' column: {path}")
             sys.exit(1)
         subset = df["mic_value"].values
         n_windows = max(0, len(subset) - window_size)
         if verbose:
-            print(f"  label={label}: {len(subset)} samples → {n_windows} windows")
+            print(f"  {name}: {len(subset)} samples → {n_windows} windows")
         for i in range(n_windows):
             window = subset[i : i + window_size]
             X.append(extract_features(window, feature_count))
-            y.append(label)
+            y.append(label_index[name])
 
     if not X:
         print(
@@ -195,27 +273,94 @@ def _train_from_csvs(
     y_arr = np.array(y)
 
     if verbose:
-        print(f"\nTotal windows: {len(X_arr)}  "
-              f"(clap={sum(y_arr==1)}, noise={sum(y_arr==0)})")
+        counts = {name: int(sum(y_arr == i)) for name, i in label_index.items()}
+        print(f"\nTotal windows: {len(X_arr)}  {counts}")
+
+    # Class balance check — warn if any class outnumbers another by >3:1
+    counts_list = [int(sum(y_arr == i)) for i in range(len(label_names))]
+    max_count = max(counts_list)
+    min_count = max(min(counts_list), 1)
+    ratio = max_count / min_count
+    if ratio > 3.0:
+        dominant   = label_names[counts_list.index(max_count)]
+        underrepresented = label_names[counts_list.index(min(counts_list))]
+        print(f"\n⚠️  Class imbalance (ratio {ratio:.1f}:1): '{dominant}' dominates. "
+              f"Consider collecting more '{underrepresented}' samples.")
 
     X_train, X_test, y_train, y_test = train_test_split(
         X_arr, y_arr, test_size=0.2, random_state=42, stratify=y_arr
     )
 
     print("\nTraining logistic regression...")
-    model = LogisticRegression(max_iter=1000)
+    n_classes = len(label_names)
+    model = LogisticRegression(
+        max_iter=1000,
+        multi_class='ovr',     # one-vs-rest for N-class classification
+        C=1.0,
+    )
     model.fit(X_train, y_train)
 
     preds = model.predict(X_test)
     accuracy = accuracy_score(y_test, preds)
     print(f"✅ Accuracy: {accuracy * 100:.2f}%")
 
+    # Confusion matrix — always shown
+    cm = confusion_matrix(y_test, preds, labels=list(range(n_classes)))
+    col_w = max(len(n) for n in label_names) + 2
+    print(f"\n   Confusion matrix (rows=actual, cols=predicted):")
+    header = ''.join(f'{n:>{col_w}}' for n in label_names)
+    print(f"   {'':>{col_w}}{header}")
+    for i, row_name in enumerate(label_names):
+        row = ''.join(f'{cm[i][j]:>{col_w}}' for j in range(n_classes))
+        print(f"   {row_name:>{col_w}}{row}")
+    # Highlight any off-diagonal values
+    for i in range(n_classes):
+        for j in range(n_classes):
+            if i != j and cm[i][j] > 0:
+                print(f"   ⚠️  {cm[i][j]} '{label_names[i]}' sample(s) "
+                      f"misclassified as '{label_names[j]}'")
+
     if verbose:
         print("\nClassification report:")
-        print(classification_report(y_test, preds, target_names=["noise", "clap"]))
+        print(classification_report(y_test, preds, target_names=label_names))
 
-    versioned_save(model_out, lambda p, m=model: joblib.dump(m, p))
-    print(f"💾 Saved model to {model_out}")
+    if dry_run:
+        print("\n🔍 Dry run — model NOT saved. Remove --dry-run to save.")
+    else:
+        # Save model bundled with label_names so classifier knows class names
+        bundle = {'model': model, 'label_names': label_names}
+        versioned_save(model_out, lambda p, b=bundle: joblib.dump(b, p))
+        print(f"💾 Saved model to {model_out}  (classes: {label_names})")
+
+    if export_tflite_path and not dry_run:
+        _export_sklearn_tflite(model, X_train.shape[1], export_tflite_path, label_names)
+
+
+def _export_sklearn_tflite(model, n_features: int, out_path: str, label_names: list[str] | None = None) -> None:
+    """
+    Wrap a trained sklearn LogisticRegression as a TFLite model so
+    listener.py can use it without scikit-learn at runtime.
+    """
+    try:
+        import tensorflow as tf
+        import numpy as np
+        # Build a tiny Keras model that replicates the LR decision boundary
+        inp = tf.keras.Input(shape=(n_features,))
+        out = tf.keras.layers.Dense(
+            1, activation='sigmoid',
+            kernel_initializer=tf.keras.initializers.Constant(model.coef_),
+            bias_initializer=tf.keras.initializers.Constant(model.intercept_),
+            trainable=False,
+        )(inp)
+        keras_model = tf.keras.Model(inp, out)
+        converter = tf.lite.TFLiteConverter.from_keras_model(keras_model)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        tflite_bytes = converter.convert()
+        with open(out_path, 'wb') as f:
+            f.write(tflite_bytes)
+        print(f"✅ TFLite model exported: {out_path} ({len(tflite_bytes)//1024} KB)")
+    except Exception as e:
+        print(f"Warning: TFLite export failed: {e}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -227,19 +372,14 @@ def parse_args() -> argparse.Namespace:
         description="Train EchoSafe clap detection model from labelled CSV data",
     )
     parser.add_argument(
-        "--clap-csv",
-        default=CLAP_CSV,
-        help=f"CSV of clap examples, label=1 (default: {CLAP_CSV})",
-    )
-    parser.add_argument(
-        "--noise-csv",
-        default=NOISE_CSV,
-        help=f"CSV of noise examples, label=0 (default: {NOISE_CSV})",
+        "--training-dir",
+        default=TRAINING_DATA_DIR,
+        help=f"directory containing label_*.csv files (default: {TRAINING_DATA_DIR})",
     )
     parser.add_argument(
         "--model",
-        default=CLAP_MODEL_PATH,
-        help=f"output model path (default: {CLAP_MODEL_PATH})",
+        default=SOUND_MODEL_PATH,
+        help=f"output model path (default: {SOUND_MODEL_PATH})",
     )
     parser.add_argument(
         "--window-size",
@@ -254,6 +394,17 @@ def parse_args() -> argparse.Namespace:
         help=f"number of FFT features per window (default: {FEATURE_COUNT})",
     )
     parser.add_argument(
+        "--export-tflite",
+        metavar="PATH",
+        default=None,
+        help="also export model as TFLite to PATH (for use with listener.py)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="evaluate model without saving — shows confusion matrix and accuracy only",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="print window counts and full classification report",
@@ -264,12 +415,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     _train_from_csvs(
-        clap_csv=args.clap_csv,
-        noise_csv=args.noise_csv,
+        training_dir=args.training_dir,
         model_out=args.model,
         window_size=args.window_size,
         feature_count=args.feature_count,
         verbose=args.verbose,
+        dry_run=args.dry_run,
+        export_tflite_path=args.export_tflite,
     )
     return 0
 
