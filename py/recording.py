@@ -171,15 +171,15 @@ def record(
         sys.exit(1)
 
     # ── Calibration ───────────────────────────────────────────────────────────
-    print("Calibrating noise floor...")
+    print(f"Calibrating noise floor ({CALIBRATION_SECONDS}s) — stay quiet...")
     calibration: list[int] = []
     cal_start = time()
 
+    ser.timeout = 0.05   # short timeout so readline never stalls the timer
     while time() - cal_start < CALIBRATION_SECONDS:
-        # FIX 12: use _read_int() so decoding is correct
-        val = _read_int(ser)
-        if val is not None:
-            calibration.append(val)
+        vals = _read_ints(ser)
+        calibration.extend(vals)
+    ser.timeout = 1.0    # restore normal timeout for the recording loop
 
     if not calibration:
         print("Calibration failed: no data received from Arduino.")

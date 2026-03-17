@@ -62,6 +62,19 @@ unsigned long lastSampleTime = 0;
 bool hasPending = false;
 int  pendingVal = 0;
 
+// ── Blink state (non-blocking) ────────────────────────────────────────────────
+// When a sound is detected Python sends '1'. Instead of turning the LED on
+// solid we blink it 3 times so the user gets a clear visual pulse.
+// delay() is never used — that would stall the sampling loop.
+const int   BLINK_COUNT    = 3;      // number of blinks per detection
+const unsigned long BLINK_ON_MS  = 80;   // ms LED is on per blink
+const unsigned long BLINK_OFF_MS = 80;   // ms LED is off between blinks
+
+bool          blinking       = false;
+int           blinksLeft     = 0;
+bool          blinkPhaseOn   = false;
+unsigned long blinkTimer     = 0;
+
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN,   OUTPUT);
@@ -76,7 +89,31 @@ void loop() {
   // ── 1. Read commands from Python (non-blocking) ───────────────────────────
   readCommands();
 
-  // ── 2. Send ADC samples at 8000 Hz ────────────────────────────────────────
+  // ── 2. Non-blocking blink handler ─────────────────────────────────────────
+  if (blinking) {
+    unsigned long now = millis();
+    if (blinkPhaseOn && now - blinkTimer >= BLINK_ON_MS) {
+      // End of ON phase — turn LED off
+      digitalWrite(LED_PIN, LOW);
+      blinkPhaseOn = false;
+      blinkTimer   = now;
+    } else if (!blinkPhaseOn && now - blinkTimer >= BLINK_OFF_MS) {
+      // End of OFF phase
+      blinksLeft--;
+      if (blinksLeft > 0) {
+        // Start next ON phase
+        digitalWrite(LED_PIN, HIGH);
+        blinkPhaseOn = true;
+        blinkTimer   = now;
+      } else {
+        // All blinks done — restore power indicator
+        blinking = false;
+        digitalWrite(LED_PIN, HIGH);
+      }
+    }
+  }
+
+  // ── 3. Send ADC samples at 8000 Hz ────────────────────────────────────────
   unsigned long now = micros();
   if (now - lastSampleTime >= SAMPLE_INTERVAL_US) {
     lastSampleTime = now;
@@ -100,16 +137,22 @@ void loop() {
 
 // ── Command handler ───────────────────────────────────────────────────────────
 // Python sends a single byte: '1' = alert on, '0' = alert off.
-// Both LED and vibration motor activate together on '1'.
+// '1' triggers a 3-blink sequence on the LED and turns the motor on.
+// '0' stops the motor (blink finishes naturally).
 void readCommands() {
   while (Serial.available() > 0) {
     char cmd = Serial.read();
     if (cmd == '1') {
+      // Start blink sequence (if already blinking, restart it)
+      blinking     = true;
+      blinksLeft   = BLINK_COUNT;
+      blinkPhaseOn = true;
+      blinkTimer   = millis();
       digitalWrite(LED_PIN,   HIGH);
       digitalWrite(MOTOR_PIN, HIGH);
     } else if (cmd == '0') {
-      digitalWrite(LED_PIN,   LOW);
       digitalWrite(MOTOR_PIN, LOW);
+      // Let the blink finish naturally — don't cut it short
     }
     // Any other byte silently ignored (\n, \r from serial monitors)
   }

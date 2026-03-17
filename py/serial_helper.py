@@ -102,3 +102,26 @@ def send(ser: serial.Serial, value: bytes, verbose: bool = False) -> bool:
         if verbose:
             print(f"Warning: serial write failed: {e}")
         return False
+
+
+# ── Auto port detection ───────────────────────────────────────────────────────
+
+def auto_detect_port(baud: int) -> str | None:
+    """
+    Scan available serial ports and return the first one that looks like
+    an Arduino (CH340, USB Serial, Arduino in the port description).
+    Returns None if nothing is found — caller falls back to COM_PORT from config.
+    """
+    try:
+        from serial.tools.list_ports import comports
+    except ImportError:
+        return None
+
+    for port in comports():
+        desc = (port.description or "").lower()
+        hwid = (port.hwid or "").lower()
+        if any(kw in desc or kw in hwid for kw in
+               ("arduino", "ch340", "ch341", "usb serial", "usb-serial")):
+            return port.device
+
+    return None
